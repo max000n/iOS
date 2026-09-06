@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         iOS Safari — Native Player v9.8
+// @name         iOS Safari — Native Player v9.9
 // @namespace    ios-native-player-button
-// @version      9.8.0
+// @version      9.9.0
 // @description  Native iOS fullscreen + Skip + Ускорение при удержании + Настройки
 // @match        *://*/*
 // @run-at       document-start
@@ -22,6 +22,9 @@
         BUTTON_SIZE: 42,
         BUTTON_MARGIN: 8,
         BUTTON_GAP: 10,
+        BUTTON_RADIUS: 30,          // Форма: 0% = квадрат, 50% = круг
+        BUTTON_OPACITY: 100,        // Прозрачность кнопок и индикатора (%)
+        BUTTON_BG_ALPHA: 85,        // Плотность серого фона (%)
         SCAN_INTERVAL: 2000,
         POSITION_UPDATE_INTERVAL: 1000,
         DEBOUNCE_TIME: 400,
@@ -94,9 +97,12 @@
 
     const buildCSS = () => {
         const C = CONFIG.BUTTON_CLASS;
+        const R = CONFIG.BUTTON_RADIUS;             // % скругления
+        const OP = CONFIG.BUTTON_OPACITY / 100;     // прозрачность элемента
+        const BG = CONFIG.BUTTON_BG_ALPHA / 100;    // плотность серого фона
+
         return `
-        /* Кнопки: absolute в координатах слоя —
-           всегда внутри видео, скроллятся вместе со страницей */
+        /* Кнопки: форма и прозрачность из настроек */
         .${C} {
             position: absolute !important;
             width: ${CONFIG.BUTTON_SIZE}px !important;
@@ -108,10 +114,10 @@
             align-items: center !important;
             justify-content: center !important;
             border: 1px solid rgba(255,255,255,.32) !important;
-            border-radius: 50% !important;
-            background: rgba(20,20,22,0.85) !important;
+            border-radius: ${R}% !important;
+            background: rgba(20,20,22,${BG}) !important;
             color: #fff !important;
-            opacity: 1 !important;
+            opacity: ${OP} !important;
             z-index: 2147483647 !important;
             backdrop-filter: blur(7px) !important;
             -webkit-backdrop-filter: blur(7px) !important;
@@ -124,7 +130,7 @@
             cursor: pointer !important;
             pointer-events: auto !important;
         }
-        .${C}:active { transform: scale(.9) !important; opacity: .9 !important; }
+        .${C}:active { transform: scale(.9) !important; filter: brightness(1.3) !important; }
         .${C} svg { width: 19px !important; height: 19px !important; display: block !important; pointer-events: none !important; }
 
         /* Слой-контейнер для кнопок и индикатора скорости */
@@ -138,18 +144,18 @@
             pointer-events: none !important;
         }
 
-        /* Индикатор скорости: absolute внутри слоя —
-           приклеен к видео, скроллится вместе с ним */
+        /* Индикатор скорости: та же форма и прозрачность */
         .${C}-speed {
             position: absolute !important;
-            background: rgba(0,0,0,0.85) !important;
+            background: rgba(0,0,0,${BG}) !important;
             color: #fff !important;
             z-index: 2147483647 !important;
             font-family: -apple-system, BlinkMacSystemFont, sans-serif !important;
             pointer-events: none !important;
             transform: translateX(-50%) !important;
             padding: 10px 20px !important;
-            border-radius: 20px !important;
+            border-radius: ${R}% !important;
+            opacity: ${OP} !important;
             font-size: 16px !important;
             font-weight: 600 !important;
             animation: npFadeSpeed 1.5s ease-in-out !important;
@@ -387,16 +393,16 @@
         el.className = `${CONFIG.BUTTON_CLASS}-${type}`;
         el.textContent = message;
 
-        // Индикатор скорости живёт ВНУТРИ слоя, привязан к видео
         if (type === 'speed') {
             if (!video || !isLiveVideo(video)) return;
             const r = video.getBoundingClientRect();
             if (r.width <= 0 || r.height <= 0) return;
 
-            const hr = getLayer().getBoundingClientRect();
+            const host = getLayer();
+            const hr = host.getBoundingClientRect();
             el.style.left = `${r.left + r.width / 2 - hr.left}px`;
             el.style.top = `${r.top + 12 - hr.top}px`;
-            getLayer().appendChild(el);
+            host.appendChild(el);
         } else {
             document.body.appendChild(el);
         }
@@ -675,8 +681,7 @@
     };
 
     // ============================================================
-    // Позиционирование (координаты слоя; scroll сокращается,
-    // т.к. слой и видео измеряются в один момент)
+    // Позиционирование
     // ============================================================
 
     const positionButtons = (video, buttons) => {
@@ -760,8 +765,11 @@
             ]
         },
         {
-            title: 'Кнопки',
+            title: 'Вид кнопок и индикатора',
             items: [
+                { key: 'BUTTON_RADIUS', label: 'Форма (квадрат ↔ круг)', type: 'range', min: 0, max: 50, step: 1, suffix: '%' },
+                { key: 'BUTTON_OPACITY', label: 'Прозрачность кнопок', type: 'range', min: 10, max: 100, step: 5, suffix: '%' },
+                { key: 'BUTTON_BG_ALPHA', label: 'Плотность серого фона', type: 'range', min: 0, max: 100, step: 5, suffix: '%' },
                 { key: 'BUTTON_SIZE', label: 'Размер кнопки', type: 'range', min: 30, max: 60, step: 1, suffix: 'px' },
                 { key: 'BUTTON_MARGIN', label: 'Отступ от края', type: 'range', min: 4, max: 30, step: 1, suffix: 'px' },
                 { key: 'BUTTON_GAP', label: 'Расстояние между кнопками', type: 'range', min: 4, max: 30, step: 1, suffix: 'px' }
