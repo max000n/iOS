@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         iOS Safari — Native Player v9.6
+// @name         iOS Safari — Native Player v9.7
 // @namespace    ios-native-player-button
-// @version      9.6.0
+// @version      9.7.0
 // @description  Native iOS fullscreen + Skip + Ускорение при удержании + Настройки
 // @match        *://*/*
 // @run-at       document-start
@@ -74,6 +74,7 @@
     const videoButtons = new Map();
     const observedShadows = new WeakSet();
     let settingsPanel = null;
+    let layer = null;
 
     // ============================================================
     // Иконки
@@ -94,8 +95,10 @@
     const buildCSS = () => {
         const C = CONFIG.BUTTON_CLASS;
         return `
+        /* Кнопки: absolute в координатах документа —
+           всегда внутри видео, скроллятся вместе со страницей */
         .${C} {
-            position: fixed !important;
+            position: absolute !important;
             width: ${CONFIG.BUTTON_SIZE}px !important;
             height: ${CONFIG.BUTTON_SIZE}px !important;
             padding: 0 !important;
@@ -119,9 +122,21 @@
             touch-action: manipulation !important;
             -webkit-tap-highlight-color: transparent !important;
             cursor: pointer !important;
+            pointer-events: auto !important;
         }
         .${C}:active { transform: scale(.9) !important; opacity: .9 !important; }
         .${C} svg { width: 19px !important; height: 19px !important; display: block !important; pointer-events: none !important; }
+
+        /* Слой-контейнер для кнопок */
+        .${C}-layer {
+            position: absolute !important;
+            top: 0 !important;
+            left: 0 !important;
+            width: 0 !important;
+            height: 0 !important;
+            z-index: 2147483647 !important;
+            pointer-events: none !important;
+        }
 
         /* Общие свойства оверлеев */
         .${C}-speed, .${C}-notification, .${C}-error {
@@ -133,7 +148,6 @@
             pointer-events: none !important;
         }
 
-        /* top/left без !important — переопределяется inline (внутри плеера) */
         .${C}-speed {
             top: 8%;
             left: 50%;
@@ -346,10 +360,21 @@
     `;
     };
 
-    // Установка и обновление стилей одной функцией
     const applyStyle = () => {
         style.textContent = buildCSS();
         if (!style.isConnected) (document.head || document.documentElement).appendChild(style);
+    };
+
+    // ============================================================
+    // Слой для кнопок (absolute в координатах документа)
+    // ============================================================
+
+    const getLayer = () => {
+        if (layer && layer.isConnected) return layer;
+        layer = document.createElement('div');
+        layer.className = CONFIG.BUTTON_CLASS + '-layer';
+        (document.body || document.documentElement).appendChild(layer);
+        return layer;
     };
 
     // ============================================================
@@ -647,7 +672,8 @@
     };
 
     // ============================================================
-    // Позиционирование
+    // Позиционирование (координаты ДОКУМЕНТА — кнопки скроллятся
+    // вместе со страницей и всегда остаются внутри видео)
     // ============================================================
 
     const positionButtons = (video, buttons) => {
@@ -659,25 +685,33 @@
         }
 
         const r = video.getBoundingClientRect();
-        const visible = r.width >= 40 && r.height >= 40 &&
-                        r.bottom > 0 && r.top < innerHeight &&
-                        r.right > 0 && r.left < innerWidth;
 
-        if (!visible) {
+        // Видео скрыто или слишком маленькое — прячем кнопки
+        if (r.width < 40 || r.height < 40) {
             buttons.forEach(btn => { btn.style.display = 'none'; });
             return;
         }
 
         buttons.forEach(btn => { btn.style.display = 'flex'; });
 
+        // Начало координат слоя (учитывает любые offset-предки)
+        const host = getLayer();
+        const hr = host.getBoundingClientRect();
+        const baseX = hr.left + scrollX;
+        const baseY = hr.top + scrollY;
+
+        // Границы видео в координатах документа
+        const docLeft = r.left + scrollX;
+        const docTop = r.top + scrollY;
+
         const count = buttons.length;
-        const top = Math.max(4, Math.min(r.top + CONFIG.BUTTON_MARGIN, innerHeight - CONFIG.BUTTON_SIZE - 4));
-        const rightMost = Math.max(4, Math.min(r.right - CONFIG.BUTTON_SIZE - CONFIG.BUTTON_MARGIN, innerWidth - CONFIG.BUTTON_SIZE - 4));
+        const top = docTop + CONFIG.BUTTON_MARGIN;
+        const rightMost = docLeft + r.width - CONFIG.BUTTON_SIZE - CONFIG.BUTTON_MARGIN;
 
         for (let i = 0; i < count; i++) {
             const left = rightMost - (count - 1 - i) * (CONFIG.BUTTON_SIZE + CONFIG.BUTTON_GAP);
-            buttons[i].style.left = `${Math.round(Math.max(4, left))}px`;
-            buttons[i].style.top = `${Math.round(top)}px`;
+            buttons[i].style.left = `${Math.round(Math.max(docLeft + 4, left) - baseX)}px`;
+            buttons[i].style.top = `${Math.round(top - baseY)}px`;
         }
     };
 
@@ -693,7 +727,7 @@
 
         const addBtn = (type, action) => {
             const btn = createButton(video, type, action);
-            document.body.appendChild(btn);
+            getLayer().appendChild(btn);
             buttons.push(btn);
             return btn;
         };
@@ -948,7 +982,6 @@
         });
     };
 
-    // Один тикер: позиции каждый тик, скан видео — каждые N тиков
     const startPeriodicTasks = () => {
         const scanEvery = Math.max(1, Math.round(CONFIG.SCAN_INTERVAL / CONFIG.POSITION_UPDATE_INTERVAL));
         let tick = 0;
@@ -983,7 +1016,8 @@
     // Запуск
     // ============================================================
 
-    addEventListener('scroll', updatePositions, { passive: true });
+    // Скролл больше не нужен для позиций: кнопки скроллятся сами.
+    // Оставляем только resize/orientation (меняется раскладка страницы).
     addEventListener('resize', updatePositions, { passive: true });
     addEventListener('orientationchange', updatePositions, { passive: true });
 
