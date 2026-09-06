@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         iOS Safari — Native Player v9.7
+// @name         iOS Safari — Native Player v9.8
 // @namespace    ios-native-player-button
-// @version      9.7.0
+// @version      9.8.0
 // @description  Native iOS fullscreen + Skip + Ускорение при удержании + Настройки
 // @match        *://*/*
 // @run-at       document-start
@@ -95,7 +95,7 @@
     const buildCSS = () => {
         const C = CONFIG.BUTTON_CLASS;
         return `
-        /* Кнопки: absolute в координатах документа —
+        /* Кнопки: absolute в координатах слоя —
            всегда внутри видео, скроллятся вместе со страницей */
         .${C} {
             position: absolute !important;
@@ -127,7 +127,7 @@
         .${C}:active { transform: scale(.9) !important; opacity: .9 !important; }
         .${C} svg { width: 19px !important; height: 19px !important; display: block !important; pointer-events: none !important; }
 
-        /* Слой-контейнер для кнопок */
+        /* Слой-контейнер для кнопок и индикатора скорости */
         .${C}-layer {
             position: absolute !important;
             top: 0 !important;
@@ -138,19 +138,15 @@
             pointer-events: none !important;
         }
 
-        /* Общие свойства оверлеев */
-        .${C}-speed, .${C}-notification, .${C}-error {
-            position: fixed !important;
+        /* Индикатор скорости: absolute внутри слоя —
+           приклеен к видео, скроллится вместе с ним */
+        .${C}-speed {
+            position: absolute !important;
             background: rgba(0,0,0,0.85) !important;
             color: #fff !important;
             z-index: 2147483647 !important;
             font-family: -apple-system, BlinkMacSystemFont, sans-serif !important;
             pointer-events: none !important;
-        }
-
-        .${C}-speed {
-            top: 8%;
-            left: 50%;
             transform: translateX(-50%) !important;
             padding: 10px 20px !important;
             border-radius: 20px !important;
@@ -159,24 +155,26 @@
             animation: npFadeSpeed 1.5s ease-in-out !important;
         }
 
-        .${C}-notification {
+        /* Уведомления и ошибки: fixed по центру экрана */
+        .${C}-notification, .${C}-error {
+            position: fixed !important;
             top: 50% !important;
             left: 50% !important;
             transform: translate(-50%, -50%) !important;
+            background: rgba(0,0,0,0.85) !important;
+            color: #fff !important;
+            z-index: 2147483647 !important;
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif !important;
+            pointer-events: none !important;
             padding: 12px 24px !important;
             border-radius: 8px !important;
             font-size: 14px !important;
-            animation: npFade 2s ease-in-out !important;
         }
-
+        .${C}-notification { animation: npFade 2s ease-in-out !important; }
         .${C}-error {
-            top: 50% !important;
-            left: 50% !important;
-            transform: translate(-50%, -50%) !important;
             background: rgba(255,0,0,.8) !important;
             padding: 10px 20px !important;
             border-radius: 5px !important;
-            font-size: 14px !important;
         }
 
         @keyframes npFade {
@@ -366,7 +364,7 @@
     };
 
     // ============================================================
-    // Слой для кнопок (absolute в координатах документа)
+    // Слой для кнопок и индикатора скорости
     // ============================================================
 
     const getLayer = () => {
@@ -389,15 +387,20 @@
         el.className = `${CONFIG.BUTTON_CLASS}-${type}`;
         el.textContent = message;
 
-        if (type === 'speed' && video && isLiveVideo(video)) {
+        // Индикатор скорости живёт ВНУТРИ слоя, привязан к видео
+        if (type === 'speed') {
+            if (!video || !isLiveVideo(video)) return;
             const r = video.getBoundingClientRect();
-            if (r.width > 0 && r.height > 0) {
-                el.style.left = `${r.left + r.width / 2}px`;
-                el.style.top = `${Math.max(8, r.top + 12)}px`;
-            }
+            if (r.width <= 0 || r.height <= 0) return;
+
+            const hr = getLayer().getBoundingClientRect();
+            el.style.left = `${r.left + r.width / 2 - hr.left}px`;
+            el.style.top = `${r.top + 12 - hr.top}px`;
+            getLayer().appendChild(el);
+        } else {
+            document.body.appendChild(el);
         }
 
-        document.body.appendChild(el);
         setTimeout(() => el.remove(), duration);
     };
 
@@ -672,8 +675,8 @@
     };
 
     // ============================================================
-    // Позиционирование (координаты ДОКУМЕНТА — кнопки скроллятся
-    // вместе со страницей и всегда остаются внутри видео)
+    // Позиционирование (координаты слоя; scroll сокращается,
+    // т.к. слой и видео измеряются в один момент)
     // ============================================================
 
     const positionButtons = (video, buttons) => {
@@ -686,7 +689,6 @@
 
         const r = video.getBoundingClientRect();
 
-        // Видео скрыто или слишком маленькое — прячем кнопки
         if (r.width < 40 || r.height < 40) {
             buttons.forEach(btn => { btn.style.display = 'none'; });
             return;
@@ -694,24 +696,18 @@
 
         buttons.forEach(btn => { btn.style.display = 'flex'; });
 
-        // Начало координат слоя (учитывает любые offset-предки)
-        const host = getLayer();
-        const hr = host.getBoundingClientRect();
-        const baseX = hr.left + scrollX;
-        const baseY = hr.top + scrollY;
-
-        // Границы видео в координатах документа
-        const docLeft = r.left + scrollX;
-        const docTop = r.top + scrollY;
+        const hr = getLayer().getBoundingClientRect();
+        const offX = hr.left;
+        const offY = hr.top;
 
         const count = buttons.length;
-        const top = docTop + CONFIG.BUTTON_MARGIN;
-        const rightMost = docLeft + r.width - CONFIG.BUTTON_SIZE - CONFIG.BUTTON_MARGIN;
+        const top = r.top + CONFIG.BUTTON_MARGIN - offY;
+        const rightMost = r.right - CONFIG.BUTTON_SIZE - CONFIG.BUTTON_MARGIN - offX;
 
         for (let i = 0; i < count; i++) {
             const left = rightMost - (count - 1 - i) * (CONFIG.BUTTON_SIZE + CONFIG.BUTTON_GAP);
-            buttons[i].style.left = `${Math.round(Math.max(docLeft + 4, left) - baseX)}px`;
-            buttons[i].style.top = `${Math.round(top - baseY)}px`;
+            buttons[i].style.left = `${Math.round(Math.max(r.left + 4 - offX, left))}px`;
+            buttons[i].style.top = `${Math.round(top)}px`;
         }
     };
 
@@ -1016,8 +1012,6 @@
     // Запуск
     // ============================================================
 
-    // Скролл больше не нужен для позиций: кнопки скроллятся сами.
-    // Оставляем только resize/orientation (меняется раскладка страницы).
     addEventListener('resize', updatePositions, { passive: true });
     addEventListener('orientationchange', updatePositions, { passive: true });
 
