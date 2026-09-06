@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         iOS Safari — Native Player v9.9
+// @name         iOS Safari — Native Player v9.10
 // @namespace    ios-native-player-button
-// @version      9.9.0
+// @version      9.10.0
 // @description  Native iOS fullscreen + Skip + Ускорение при удержании + Настройки
 // @match        *://*/*
 // @run-at       document-start
@@ -89,6 +89,12 @@
         settings: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`
     };
 
+    // Иконки индикатора скорости (как на YouTube)
+    const SPEED_ICONS = {
+        fast: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 5.5v13L13 12 3 5.5z" fill="currentColor"/><path d="M13 5.5v13L23 12 13 5.5z" fill="currentColor"/></svg>`,
+        normal: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M7 4.5v15L19 12 7 4.5z" fill="currentColor"/></svg>`
+    };
+
     // ============================================================
     // CSS
     // ============================================================
@@ -144,21 +150,33 @@
             pointer-events: none !important;
         }
 
-        /* Индикатор скорости: та же форма и прозрачность */
+        /* Индикатор скорости: одна строка, значок как на YouTube */
         .${C}-speed {
             position: absolute !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            gap: 6px !important;
+            white-space: nowrap !important;
+            line-height: 1 !important;
             background: rgba(0,0,0,${BG}) !important;
             color: #fff !important;
             z-index: 2147483647 !important;
             font-family: -apple-system, BlinkMacSystemFont, sans-serif !important;
             pointer-events: none !important;
             transform: translateX(-50%) !important;
-            padding: 10px 20px !important;
+            padding: 10px 16px !important;
             border-radius: ${R}% !important;
             opacity: ${OP} !important;
             font-size: 16px !important;
             font-weight: 600 !important;
             animation: npFadeSpeed 1.5s ease-in-out !important;
+        }
+        .${C}-speed svg {
+            width: 18px !important;
+            height: 18px !important;
+            flex-shrink: 0 !important;
+            display: block !important;
         }
 
         /* Уведомления и ошибки: fixed по центру экрана */
@@ -387,32 +405,40 @@
 
     const isLiveVideo = (video) => video instanceof HTMLVideoElement && video.isConnected;
 
-    const showOverlay = (message, type, duration, video) => {
+    // Текстовые оверлеи (уведомление / ошибка)
+    const showOverlay = (message, type, duration) => {
         if (!document.body) return;
         const el = document.createElement('div');
         el.className = `${CONFIG.BUTTON_CLASS}-${type}`;
         el.textContent = message;
-
-        if (type === 'speed') {
-            if (!video || !isLiveVideo(video)) return;
-            const r = video.getBoundingClientRect();
-            if (r.width <= 0 || r.height <= 0) return;
-
-            const host = getLayer();
-            const hr = host.getBoundingClientRect();
-            el.style.left = `${r.left + r.width / 2 - hr.left}px`;
-            el.style.top = `${r.top + 12 - hr.top}px`;
-            host.appendChild(el);
-        } else {
-            document.body.appendChild(el);
-        }
-
+        document.body.appendChild(el);
         setTimeout(() => el.remove(), duration);
     };
 
     const showNotification = (m) => showOverlay(m, 'notification', CONFIG.NOTIFICATION_DURATION);
-    const showSpeedNotification = (m, v) => showOverlay(m, 'speed', 1500, v);
     const showError = (m) => showOverlay(m, 'error', CONFIG.ERROR_DURATION);
+
+    // Индикатор скорости: "2x" + значок как на YouTube, в одну строку
+    const formatSpeed = (v) => `${parseFloat(Number(v).toFixed(2))}x`;
+
+    const showSpeedNotification = (speed, video, fast) => {
+        if (!document.body || !video || !isLiveVideo(video)) return;
+
+        const r = video.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return;
+
+        const el = document.createElement('div');
+        el.className = `${CONFIG.BUTTON_CLASS}-speed`;
+        el.innerHTML = `<span>${formatSpeed(speed)}</span>${fast ? SPEED_ICONS.fast : SPEED_ICONS.normal}`;
+
+        const host = getLayer();
+        const hr = host.getBoundingClientRect();
+        el.style.left = `${r.left + r.width / 2 - hr.left}px`;
+        el.style.top = `${r.top + 12 - hr.top}px`;
+        host.appendChild(el);
+
+        setTimeout(() => el.remove(), 1500);
+    };
 
     const formatTime = (seconds) => {
         if (!seconds || isNaN(seconds) || seconds < 0) return '0:00';
@@ -475,7 +501,7 @@
             isHolding = false;
             suppressClick = true;
             setTimeout(() => { suppressClick = false; }, 500);
-            if (notify) showSpeedNotification(`▶ ${originalSpeed}x`, video);
+            if (notify) showSpeedNotification(originalSpeed, video, false);
             return true;
         };
 
@@ -494,7 +520,7 @@
 
                 video.playbackRate = CONFIG.HOLD_SPEED;
                 isHolding = true;
-                showSpeedNotification(`⚡ ${CONFIG.HOLD_SPEED}x`, video);
+                showSpeedNotification(CONFIG.HOLD_SPEED, video, true);
 
                 safetyTimer = setTimeout(() => resetHold(true), CONFIG.HOLD_SAFETY_TIMEOUT);
 
@@ -947,7 +973,7 @@
     };
 
     const originalAttachShadow = Element.prototype.attachShadow;
-    Element.prototype.attachShadow = function(init) {
+    Element.prototype.attachShadow = function(init) => {
         const shadow = originalAttachShadow.call(this, init);
         try { processShadow(shadow); } catch (e) {}
         return shadow;
