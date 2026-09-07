@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Redirect Magnet Links to Webtor.io (new tab)
 // @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  Opens magnet links on webtor.io in a new tab.
+// @version      1.2
+// @description  Opens magnet links on webtor.io in a new tab (fallback to same tab if popup blocked).
 // @author       canary_in_a_coleslaw-ChatGPT
 // @match        *://*/*
 // @grant        none
@@ -10,23 +10,33 @@
 
 (function() {
     'use strict';
-    document.addEventListener('click', function(e) {
-        const clickedEl = e.target.closest('a');
-        if (!clickedEl) return;
-        const href = clickedEl.href;
-        if (!href.startsWith('magnet:')) return;
 
-        e.preventDefault(); // отменяем стандартное поведение
-
-        // Ищем хеш (40 символов A-F0-9)
-        const match = href.match(/[A-F0-9]{40}/i);
+    function openWebtor(magnetHref) {
+        // Ищем 40-символьный хеш (регистронезависимо)
+        const match = magnetHref.match(/[A-F0-9]{40}/i);
         if (!match) {
-            // если хеш не найден, просто открываем magnet как есть (бесполезно)
-            window.open(href, '_blank');
+            // Если хеша нет – не делаем ничего, чтобы не вызвать ошибку
             return;
         }
         const hash = match[0].toLowerCase();
         const webtorUrl = 'https://webtor.io/' + hash;
-        window.open(webtorUrl, '_blank');
-    }, true);
+
+        // Пытаемся открыть в новой вкладке
+        const newWin = window.open(webtorUrl, '_blank');
+        if (!newWin || newWin.closed || typeof newWin.closed === 'undefined') {
+            // Если всплывающее окно заблокировано – открываем в текущей вкладке
+            location.href = webtorUrl;
+        }
+    }
+
+    document.addEventListener('click', function(e) {
+        const link = e.target.closest('a');
+        if (!link) return;
+        const href = link.getAttribute('href'); // используем getAttribute, чтобы получить原始ный href
+        if (!href || !href.startsWith('magnet:')) return;
+
+        e.preventDefault();
+        e.stopPropagation(); // предотвращаем другие обработчики
+        openWebtor(href);
+    }, true); // true – перехват на фазе захвата
 })();
