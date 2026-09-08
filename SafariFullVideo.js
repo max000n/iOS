@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         iOS Safari — Native Player
 // @namespace    ios-native-player-button
-// @version      9.15.0
-// @description  Native iOS fullscreen + Skip + Ускорение при удержании + Настройки
+// @version      9.16.0
+// @description  Native iOS fullscreen + Skip + Ускорение при удержании + Настройки + YouTube
 // @match        *://*/*
 // @run-at       document-start
 // @grant        none
@@ -96,6 +96,32 @@
     const SPEED_ICONS = {
         fast: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 5.5v13L13 12 3 5.5z" fill="currentColor"/><path d="M13 5.5v13L23 12 13 5.5z" fill="currentColor"/></svg>',
         normal: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M7 4.5v15L19 12 7 4.5z" fill="currentColor"/></svg>'
+    };
+
+    // ============================================================
+    // YouTube-адаптер
+    // ============================================================
+
+    const isYouTube = () => /(^|\.)(youtube\.com|youtube-nocookie\.com)$/.test(location.hostname);
+
+    const getYTPlayer = () => {
+        const p = document.getElementById('movie_player');
+        if (p && typeof p.getVideoTag === 'function' && typeof p.seekTo === 'function') return p;
+        return null;
+    };
+
+    const ytGetRate = (yt) => {
+        if (yt && typeof yt.getPlaybackRate === 'function') {
+            const r = yt.getPlaybackRate();
+            if (typeof r === 'number' && r > 0) return r;
+        }
+        return null;
+    };
+
+    const ytSetRate = (yt, rate) => {
+        if (yt && typeof yt.setPlaybackRate === 'function') {
+            try { yt.setPlaybackRate(rate); } catch (e) {}
+        }
     };
 
     // ============================================================
@@ -239,7 +265,7 @@
     };
 
     // ============================================================
-    // Ускорение при удержании
+    // Ускорение при удержании (с поддержкой YouTube API)
     // ============================================================
 
     function setupHoldToSpeed(video) {
@@ -254,6 +280,7 @@
         let holdTimer = null, safetyTimer = null, checkInterval = null;
         let originalSpeed = 1, isHolding = false, suppressClick = false;
         let startX = 0, startY = 0;
+        let yt = null;
 
         const getCoords = (event) => {
             if (event.touches && event.touches.length) return { x: event.touches[0].clientX, y: event.touches[0].clientY };
@@ -267,10 +294,21 @@
             if (checkInterval) { clearInterval(checkInterval); checkInterval = null; }
         };
 
+        const currentRate = () => {
+            const r = ytGetRate(yt);
+            if (r !== null) return r;
+            return video.playbackRate || 1;
+        };
+
+        const applyRate = (rate) => {
+            ytSetRate(yt, rate);
+            try { video.playbackRate = rate; } catch (e) {}
+        };
+
         const resetHold = (notify) => {
             clearHoldTimers();
             if (!isHolding) return false;
-            video.playbackRate = originalSpeed;
+            applyRate(originalSpeed);
             isHolding = false;
             suppressClick = true;
             setTimeout(() => { suppressClick = false; }, 500);
@@ -285,13 +323,14 @@
             const coords = getCoords(event);
             startX = coords.x;
             startY = coords.y;
-            originalSpeed = video.playbackRate || 1;
+            yt = isYouTube() ? getYTPlayer() : null;
+            originalSpeed = currentRate();
 
             holdTimer = setTimeout(() => {
                 holdTimer = null;
                 if (isHolding || video.paused || video.ended || !isLiveVideo(video)) return;
 
-                video.playbackRate = CONFIG.HOLD_SPEED;
+                applyRate(CONFIG.HOLD_SPEED);
                 isHolding = true;
                 showSpeedNotification(CONFIG.HOLD_SPEED, video, true);
 
@@ -299,8 +338,8 @@
 
                 checkInterval = setInterval(() => {
                     if (!isLiveVideo(video) || video.ended) { resetHold(true); return; }
-                    if (isHolding && video.playbackRate !== CONFIG.HOLD_SPEED) {
-                        video.playbackRate = CONFIG.HOLD_SPEED;
+                    if (isHolding && currentRate() !== CONFIG.HOLD_SPEED) {
+                        applyRate(CONFIG.HOLD_SPEED);
                     }
                 }, CONFIG.HOLD_CHECK_INTERVAL);
             }, CONFIG.HOLD_DELAY);
@@ -371,6 +410,9 @@
         on(window, 'touchcancel', onWindowEnd, true);
         on(window, 'blur', () => resetHold(true), true);
 
+        // YouTube: SPA-переход между видео — сбрасываем удержание
+        on(window, 'yt-navigate-finish', () => resetHold(true), true);
+
         return () => {
             clearHoldTimers();
             for (const item of listeners) {
@@ -428,6 +470,22 @@
             liveVideo.currentTime = Math.max(0, t);
             showNotification('Пропущено до ' + formatTime(t));
         };
+
+        // YouTube: перемотка через официальный API плеера
+        if (isYouTube()) {
+            const yt = getYTPlayer();
+            if (yt && typeof yt.getDuration === 'function') {
+                const d = yt.getDuration();
+                if (d && isFinite(d) && d > 0) {
+                    const t = Math.max(0, d - CONFIG.SKIP_OFFSET);
+                    try {
+                        yt.seekTo(t, true);
+                        showNotification('Пропущено до ' + formatTime(t));
+                        return;
+                    } catch (e) {}
+                }
+            }
+        }
 
         if (Number.isFinite(liveVideo.duration) && liveVideo.duration > 0) {
             try { applySkip(liveVideo.duration - CONFIG.SKIP_OFFSET); return; } catch (e) {}
@@ -754,7 +812,7 @@
     };
 
     const originalAttachShadow = Element.prototype.attachShadow;
-    Element.prototype.attachShadow = function (init) {
+    Element.prototype.attachShadow = function (init) => {
         const shadow = originalAttachShadow.call(this, init);
         try { processShadow(shadow); } catch (e) {}
         return shadow;
