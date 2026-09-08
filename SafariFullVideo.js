@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         iOS Safari — Native Player v9.14
+// @name         iOS Safari — Native Player
 // @namespace    ios-native-player-button
-// @version      9.14.0
+// @version      9.14.1
 // @description  Native iOS fullscreen + Skip + Ускорение при удержании + Настройки
 // @match        *://*/*
 // @run-at       document-start
