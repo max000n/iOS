@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         iOS Safari — Native Player
 // @namespace    ios-native-player-button
-// @version      9.17.0
-// @description  Native iOS fullscreen + Skip + Ускорение при удержании + Настройки + YouTube
+// @version      9.14.0
+// @description  Native iOS fullscreen + Skip + Ускорение при удержании + Настройки
 // @match        *://*/*
 // @run-at       document-start
 // @grant        none
@@ -22,9 +22,9 @@
         BUTTON_SIZE: 42,
         BUTTON_MARGIN: 8,
         BUTTON_GAP: 10,
-        BUTTON_RADIUS: 30,
-        BUTTON_OPACITY: 50,
-        BUTTON_BG_ALPHA: 50,
+        BUTTON_RADIUS: 30,      // 0% = квадрат, 50% = круг
+        BUTTON_OPACITY: 50,     // прозрачность кнопок и индикатора (%)
+        BUTTON_BG_ALPHA: 50,    // плотность серого фона (%)
         SCAN_INTERVAL: 2000,
         POSITION_UPDATE_INTERVAL: 1000,
         DEBOUNCE_TIME: 400,
@@ -40,6 +40,8 @@
         BUTTON_CLASS: 'ios-native-player-button'
     };
 
+    // Минимальный размер видео, для которого создаются кнопки
+    // (защищает от служебных/скрытых/крошечных video-элементов)
     const MIN_VIDEO_W = 140;
     const MIN_VIDEO_H = 100;
 
@@ -99,42 +101,6 @@
     };
 
     // ============================================================
-    // YouTube-адаптер
-    // ============================================================
-
-    const isYouTube = () => /(^|\.)(youtube\.com|youtube-nocookie\.com)$/.test(location.hostname);
-
-    const getYTPlayer = () => {
-        const p = document.getElementById('movie_player');
-        if (p && typeof p.getVideoTag === 'function' && typeof p.seekTo === 'function') return p;
-        return null;
-    };
-
-    // Контейнер плеера: по нему позиционируем кнопки,
-    // даже если сам <video> скрыт (постер) или заменён
-    const getYTAnchor = () => {
-        if (!isYouTube()) return null;
-        return document.getElementById('movie_player') ||
-            document.querySelector('.html5-video-player') ||
-            document.getElementById('player-container') ||
-            document.getElementById('player');
-    };
-
-    const ytGetRate = (yt) => {
-        if (yt && typeof yt.getPlaybackRate === 'function') {
-            const r = yt.getPlaybackRate();
-            if (typeof r === 'number' && r > 0) return r;
-        }
-        return null;
-    };
-
-    const ytSetRate = (yt, rate) => {
-        if (yt && typeof yt.setPlaybackRate === 'function') {
-            try { yt.setPlaybackRate(rate); } catch (e) {}
-        }
-    };
-
-    // ============================================================
     // CSS (минифицированный, генерируется из CONFIG)
     // ============================================================
 
@@ -145,11 +111,13 @@
         const R = CONFIG.BUTTON_RADIUS;
         const OP = CONFIG.BUTTON_OPACITY / 100;
         const BG = CONFIG.BUTTON_BG_ALPHA / 100;
+        // Радиус в пикселях: та же кривизна угла, что и у кнопок
         const RPX = Math.round(CONFIG.BUTTON_SIZE * R / 100);
         return '.' + C + '{position:absolute!important;width:' + CONFIG.BUTTON_SIZE + 'px!important;height:' + CONFIG.BUTTON_SIZE + 'px!important;padding:0!important;margin:0!important;box-sizing:border-box!important;display:flex!important;align-items:center!important;justify-content:center!important;border:1px solid rgba(255,255,255,.32)!important;border-radius:' + R + '%!important;background:rgba(20,20,22,' + BG + ')!important;color:#fff!important;opacity:' + OP + '!important;z-index:2147483647!important;backdrop-filter:blur(7px)!important;-webkit-backdrop-filter:blur(7px)!important;-webkit-appearance:none!important;appearance:none!important;outline:none!important;box-shadow:0 2px 10px rgba(0,0,0,.35)!important;touch-action:manipulation!important;-webkit-tap-highlight-color:transparent!important;cursor:pointer!important;pointer-events:auto!important}'
         + '.' + C + ':active{transform:scale(.9)!important;filter:brightness(1.3)!important}'
         + '.' + C + ' svg{width:19px!important;height:19px!important;display:block!important;pointer-events:none!important}'
         + '.' + C + '-layer{position:absolute!important;top:0!important;left:0!important;width:0!important;height:0!important;z-index:2147483647!important;pointer-events:none!important}'
+        // Бейдж скорости: высота как у кнопки, радиус в px (не даёт эллипсов на широкой пилюле)
         + '.' + C + '-speed{position:absolute!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;gap:6px!important;white-space:nowrap!important;line-height:1!important;height:' + CONFIG.BUTTON_SIZE + 'px!important;box-sizing:border-box!important;border:1px solid rgba(255,255,255,.32)!important;background:rgba(20,20,22,' + BG + ')!important;color:#fff!important;opacity:' + OP + '!important;border-radius:' + RPX + 'px!important;z-index:2147483647!important;font-family:-apple-system,BlinkMacSystemFont,sans-serif!important;pointer-events:none!important;transform:translateX(-50%)!important;padding:0 14px!important;font-size:16px!important;font-weight:600!important;backdrop-filter:blur(7px)!important;-webkit-backdrop-filter:blur(7px)!important;box-shadow:0 2px 10px rgba(0,0,0,.35)!important;animation:npFadeSpeed 1.5s ease-in-out!important}'
         + '.' + C + '-speed svg{width:18px!important;height:18px!important;flex-shrink:0!important;display:block!important}'
         + '.' + C + '-notification,.' + C + '-error{position:fixed!important;top:50%!important;left:50%!important;transform:translate(-50%,-50%)!important;background:rgba(0,0,0,.85)!important;color:#fff!important;z-index:2147483647!important;font-family:-apple-system,BlinkMacSystemFont,sans-serif!important;pointer-events:none!important;padding:12px 24px!important;border-radius:8px!important;font-size:14px!important}'
@@ -208,6 +176,7 @@
 
     const isLiveVideo = (video) => video instanceof HTMLVideoElement && video.isConnected;
 
+    // Видео достаточно большое и не скрыто стилями
     const isMeaningfulVideo = (video) => {
         const r = video.getBoundingClientRect();
         if (r.width < MIN_VIDEO_W || r.height < MIN_VIDEO_H) return false;
@@ -275,7 +244,7 @@
     };
 
     // ============================================================
-    // Ускорение при удержании (с поддержкой YouTube API)
+    // Ускорение при удержании
     // ============================================================
 
     function setupHoldToSpeed(video) {
@@ -290,7 +259,6 @@
         let holdTimer = null, safetyTimer = null, checkInterval = null;
         let originalSpeed = 1, isHolding = false, suppressClick = false;
         let startX = 0, startY = 0;
-        let yt = null;
 
         const getCoords = (event) => {
             if (event.touches && event.touches.length) return { x: event.touches[0].clientX, y: event.touches[0].clientY };
@@ -304,21 +272,10 @@
             if (checkInterval) { clearInterval(checkInterval); checkInterval = null; }
         };
 
-        const currentRate = () => {
-            const r = ytGetRate(yt);
-            if (r !== null) return r;
-            return video.playbackRate || 1;
-        };
-
-        const applyRate = (rate) => {
-            ytSetRate(yt, rate);
-            try { video.playbackRate = rate; } catch (e) {}
-        };
-
         const resetHold = (notify) => {
             clearHoldTimers();
             if (!isHolding) return false;
-            applyRate(originalSpeed);
+            video.playbackRate = originalSpeed;
             isHolding = false;
             suppressClick = true;
             setTimeout(() => { suppressClick = false; }, 500);
@@ -333,14 +290,13 @@
             const coords = getCoords(event);
             startX = coords.x;
             startY = coords.y;
-            yt = isYouTube() ? getYTPlayer() : null;
-            originalSpeed = currentRate();
+            originalSpeed = video.playbackRate || 1;
 
             holdTimer = setTimeout(() => {
                 holdTimer = null;
                 if (isHolding || video.paused || video.ended || !isLiveVideo(video)) return;
 
-                applyRate(CONFIG.HOLD_SPEED);
+                video.playbackRate = CONFIG.HOLD_SPEED;
                 isHolding = true;
                 showSpeedNotification(CONFIG.HOLD_SPEED, video, true);
 
@@ -348,8 +304,8 @@
 
                 checkInterval = setInterval(() => {
                     if (!isLiveVideo(video) || video.ended) { resetHold(true); return; }
-                    if (isHolding && currentRate() !== CONFIG.HOLD_SPEED) {
-                        applyRate(CONFIG.HOLD_SPEED);
+                    if (isHolding && video.playbackRate !== CONFIG.HOLD_SPEED) {
+                        video.playbackRate = CONFIG.HOLD_SPEED;
                     }
                 }, CONFIG.HOLD_CHECK_INTERVAL);
             }, CONFIG.HOLD_DELAY);
@@ -420,9 +376,6 @@
         on(window, 'touchcancel', onWindowEnd, true);
         on(window, 'blur', () => resetHold(true), true);
 
-        // YouTube: SPA-переход между видео — сбрасываем удержание
-        on(window, 'yt-navigate-finish', () => resetHold(true), true);
-
         return () => {
             clearHoldTimers();
             for (const item of listeners) {
@@ -481,22 +434,6 @@
             showNotification('Пропущено до ' + formatTime(t));
         };
 
-        // YouTube: перемотка через официальный API плеера
-        if (isYouTube()) {
-            const yt = getYTPlayer();
-            if (yt && typeof yt.getDuration === 'function') {
-                const d = yt.getDuration();
-                if (d && isFinite(d) && d > 0) {
-                    const t = Math.max(0, d - CONFIG.SKIP_OFFSET);
-                    try {
-                        yt.seekTo(t, true);
-                        showNotification('Пропущено до ' + formatTime(t));
-                        return;
-                    } catch (e) {}
-                }
-            }
-        }
-
         if (Number.isFinite(liveVideo.duration) && liveVideo.duration > 0) {
             try { applySkip(liveVideo.duration - CONFIG.SKIP_OFFSET); return; } catch (e) {}
         }
@@ -549,10 +486,10 @@
     };
 
     // ============================================================
-    // Позиционирование (anchor = контейнер плеера на YouTube)
+    // Позиционирование
     // ============================================================
 
-    const positionButtons = (video, buttons, anchor) => {
+    const positionButtons = (video, buttons) => {
         if (!buttons || !buttons.length) return;
 
         if (!isLiveVideo(video)) {
@@ -560,26 +497,15 @@
             return;
         }
 
-        const useAnchor = !!(anchor && anchor.isConnected);
-        const rectSrc = useAnchor ? anchor : video;
-        const r = rectSrc.getBoundingClientRect();
-
-        if (r.width < MIN_VIDEO_W || r.height < MIN_VIDEO_H) {
+        // Скрываем кнопки для служебных/скрытых/мелких видео
+        if (!isMeaningfulVideo(video)) {
             buttons.forEach((btn) => { btn.style.display = 'none'; });
             return;
         }
 
-        // Проверку скрытости пропускаем для YouTube-видео внутри контейнера
-        if (!useAnchor) {
-            const cs = window.getComputedStyle(video);
-            if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') {
-                buttons.forEach((btn) => { btn.style.display = 'none'; });
-                return;
-            }
-        }
-
         buttons.forEach((btn) => { btn.style.display = 'flex'; });
 
+        const r = video.getBoundingClientRect();
         const hr = getLayer().getBoundingClientRect();
         const offX = hr.left;
         const offY = hr.top;
@@ -602,15 +528,12 @@
     const attachVideo = (video) => {
         if (!(video instanceof HTMLVideoElement) || !video.isConnected || videoButtons.has(video)) return;
 
-        const anchor = getYTAnchor();
-        const useAnchor = !!(anchor && anchor.contains(video));
-
-        // Для YouTube-видео внутри контейнера плеера проверку
-        // скрытости/размера самого video не делаем
-        if (!useAnchor && !isMeaningfulVideo(video)) return;
+        // Не создаём кнопки для служебных/скрытых/мелких video
+        // (повторная попытка произойдёт при периодическом сканировании)
+        if (!isMeaningfulVideo(video)) return;
 
         const buttons = [];
-        const entry = { buttons: buttons, anchor: useAnchor ? anchor : null };
+        const entry = { buttons: buttons };
 
         const addBtn = (type, action) => {
             const btn = createButton(video, type, action);
@@ -628,7 +551,7 @@
         videoButtons.set(video, entry);
 
         try {
-            positionButtons(video, buttons, entry.anchor);
+            positionButtons(video, buttons);
         } catch (e) {
             console.error('[iOS Native Player] position error:', e);
         }
@@ -894,7 +817,7 @@
                     detachVideo(video);
                     return;
                 }
-                positionButtons(video, entry.buttons, entry.anchor);
+                positionButtons(video, entry.buttons);
             });
 
             sweepOrphanButtons();
@@ -910,6 +833,7 @@
             tick++;
             if (tick % scanEvery === 0) {
                 scanVideos();
+                // Повторно проверяем Shadow-корни: видео могло стать видимым
                 for (const process of shadowProcessors) {
                     try { process(); } catch (e) {}
                 }
@@ -949,30 +873,7 @@
         scanVideos();
         scanShadows();
         startPeriodicTasks();
-
-        // YouTube: мгновенный рескан при SPA-переходах + диагностика
-        if (isYouTube()) {
-            const rescan = () => scanVideos();
-            window.addEventListener('yt-navigate-finish', rescan, true);
-            window.addEventListener('yt-page-data-fetched', rescan, true);
-            setTimeout(rescan, 1500);
-            setTimeout(rescan, 4000);
-
-            const debug = () => {
-                const vids = document.querySelectorAll('video');
-                const sizes = [];
-                vids.forEach((v) => {
-                    const r = v.getBoundingClientRect();
-                    sizes.push(Math.round(r.width) + 'x' + Math.round(r.height));
-                });
-                const anchor = getYTAnchor();
-                console.log('[iOS Native Player] YT debug: videos=' + vids.length + ' [' + sizes.join(', ') + '] anchor=' + (anchor ? anchor.id || anchor.className : 'none') + ' attached=' + videoButtons.size);
-            };
-            setTimeout(debug, 3000);
-            window.addEventListener('yt-navigate-finish', () => setTimeout(debug, 1500), true);
-        }
-
-        console.log('[iOS Native Player] loaded OK');
+        console.log('[iOS Native Player] v9.14 loaded OK');
     } catch (e) {
         console.error('[iOS Native Player] start error:', e);
     }
