@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         iOS Safari — Native Player
 // @namespace    ios-native-player-button
-// @version      9.16.0
+// @version      9.17.0
 // @description  Native iOS fullscreen + Skip + Ускорение при удержании + Настройки + YouTube
 // @match        *://*/*
 // @run-at       document-start
@@ -108,6 +108,16 @@
         const p = document.getElementById('movie_player');
         if (p && typeof p.getVideoTag === 'function' && typeof p.seekTo === 'function') return p;
         return null;
+    };
+
+    // Контейнер плеера: по нему позиционируем кнопки,
+    // даже если сам <video> скрыт (постер) или заменён
+    const getYTAnchor = () => {
+        if (!isYouTube()) return null;
+        return document.getElementById('movie_player') ||
+            document.querySelector('.html5-video-player') ||
+            document.getElementById('player-container') ||
+            document.getElementById('player');
     };
 
     const ytGetRate = (yt) => {
@@ -539,10 +549,10 @@
     };
 
     // ============================================================
-    // Позиционирование
+    // Позиционирование (anchor = контейнер плеера на YouTube)
     // ============================================================
 
-    const positionButtons = (video, buttons) => {
+    const positionButtons = (video, buttons, anchor) => {
         if (!buttons || !buttons.length) return;
 
         if (!isLiveVideo(video)) {
@@ -550,14 +560,26 @@
             return;
         }
 
-        if (!isMeaningfulVideo(video)) {
+        const useAnchor = !!(anchor && anchor.isConnected);
+        const rectSrc = useAnchor ? anchor : video;
+        const r = rectSrc.getBoundingClientRect();
+
+        if (r.width < MIN_VIDEO_W || r.height < MIN_VIDEO_H) {
             buttons.forEach((btn) => { btn.style.display = 'none'; });
             return;
         }
 
+        // Проверку скрытости пропускаем для YouTube-видео внутри контейнера
+        if (!useAnchor) {
+            const cs = window.getComputedStyle(video);
+            if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') {
+                buttons.forEach((btn) => { btn.style.display = 'none'; });
+                return;
+            }
+        }
+
         buttons.forEach((btn) => { btn.style.display = 'flex'; });
 
-        const r = video.getBoundingClientRect();
         const hr = getLayer().getBoundingClientRect();
         const offX = hr.left;
         const offY = hr.top;
@@ -580,10 +602,15 @@
     const attachVideo = (video) => {
         if (!(video instanceof HTMLVideoElement) || !video.isConnected || videoButtons.has(video)) return;
 
-        if (!isMeaningfulVideo(video)) return;
+        const anchor = getYTAnchor();
+        const useAnchor = !!(anchor && anchor.contains(video));
+
+        // Для YouTube-видео внутри контейнера плеера проверку
+        // скрытости/размера самого video не делаем
+        if (!useAnchor && !isMeaningfulVideo(video)) return;
 
         const buttons = [];
-        const entry = { buttons: buttons };
+        const entry = { buttons: buttons, anchor: useAnchor ? anchor : null };
 
         const addBtn = (type, action) => {
             const btn = createButton(video, type, action);
@@ -601,7 +628,7 @@
         videoButtons.set(video, entry);
 
         try {
-            positionButtons(video, buttons);
+            positionButtons(video, buttons, entry.anchor);
         } catch (e) {
             console.error('[iOS Native Player] position error:', e);
         }
@@ -812,7 +839,7 @@
     };
 
     const originalAttachShadow = Element.prototype.attachShadow;
-    Element.prototype.attachShadow = function (init) => {
+    Element.prototype.attachShadow = function (init) {
         const shadow = originalAttachShadow.call(this, init);
         try { processShadow(shadow); } catch (e) {}
         return shadow;
@@ -867,7 +894,7 @@
                     detachVideo(video);
                     return;
                 }
-                positionButtons(video, entry.buttons);
+                positionButtons(video, entry.buttons, entry.anchor);
             });
 
             sweepOrphanButtons();
@@ -922,6 +949,29 @@
         scanVideos();
         scanShadows();
         startPeriodicTasks();
+
+        // YouTube: мгновенный рескан при SPA-переходах + диагностика
+        if (isYouTube()) {
+            const rescan = () => scanVideos();
+            window.addEventListener('yt-navigate-finish', rescan, true);
+            window.addEventListener('yt-page-data-fetched', rescan, true);
+            setTimeout(rescan, 1500);
+            setTimeout(rescan, 4000);
+
+            const debug = () => {
+                const vids = document.querySelectorAll('video');
+                const sizes = [];
+                vids.forEach((v) => {
+                    const r = v.getBoundingClientRect();
+                    sizes.push(Math.round(r.width) + 'x' + Math.round(r.height));
+                });
+                const anchor = getYTAnchor();
+                console.log('[iOS Native Player] YT debug: videos=' + vids.length + ' [' + sizes.join(', ') + '] anchor=' + (anchor ? anchor.id || anchor.className : 'none') + ' attached=' + videoButtons.size);
+            };
+            setTimeout(debug, 3000);
+            window.addEventListener('yt-navigate-finish', () => setTimeout(debug, 1500), true);
+        }
+
         console.log('[iOS Native Player] loaded OK');
     } catch (e) {
         console.error('[iOS Native Player] start error:', e);
