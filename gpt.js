@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         ChatGPT Auto Register v59 (Help Menu)
+// @name         ChatGPT Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      59.0
+// @version      59.1
 // @description  Авторегистрация ChatGPT + контекст + справка
 // @author       You
 // @match        https://chatgpt.com/*
