@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Magnet → Webtor.io
 // @namespace    http://tampermonkey.net/
-// @version      8.1
-// @description  Перехват magnet-ссылок, меню Webtor и копирование
+// @version      9.0
+// @description  Универсальный перехват magnet-ссылок, Webtor и копирование
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_setClipboard
@@ -14,10 +14,15 @@
 (function(){
 'use strict';
 
-const WT='https://webtor.io/ru/',KEY='__wt_magnet__',ID='__wt_',MAXD=6;
+const WT='https://webtor.io/ru/';
+const KEY='__wt_magnet__';
+const ID='__wt_';
+const MAXD=6;
 const $=(s,p=document)=>p.querySelector(s);
 const isWT=/(\.|^)webtor\.io$/i.test(location.hostname);
+
 let bypass=false,captured=null;
+let themeCache=null,themeTime=0;
 
 function getMagnet(v){
     if(typeof v!=='string')return null;
@@ -29,21 +34,34 @@ function getMagnet(v){
 
 function scan(o,d=0,seen=new Set()){
     if(!o||d>MAXD)return null;
-    if(typeof o==='string')return getMagnet(o);
-    if(typeof o!=='object'&&typeof o!=='function'||seen.has(o))return null;
+
+    if(typeof o==='string')
+        return getMagnet(o);
+
+    if(
+        (typeof o!=='object'&&typeof o!=='function')||
+        seen.has(o)
+    )return null;
 
     seen.add(o);
+
     let n=0;
 
     for(const k of Object.keys(o)){
-        if(++n>300)break;
+        if(++n>250)break;
+
         try{
-            const v=o[k],m=getMagnet(v);
+            const v=o[k];
+            const m=getMagnet(v);
+
             if(m)return m;
+
             const x=scan(v,d+1,seen);
+
             if(x)return x;
         }catch(_){}
     }
+
     return null;
 }
 
@@ -56,7 +74,12 @@ function reactMagnet(el){
 
             try{
                 const r=n[k];
-                const m=scan(r?.memoizedProps)||scan(r?.pendingProps)||scan(r);
+
+                const m=
+                    scan(r?.memoizedProps)||
+                    scan(r?.pendingProps)||
+                    scan(r?.memoizedState);
+
                 if(m)return m;
             }catch(_){}
         }
@@ -77,14 +100,20 @@ function domMagnet(el){
         }
 
         for(const k of [
-            'value','href','src','data-href','data-url',
-            'data-magnet','data-link','data-magnet-url'
+            'href',
+            'value',
+            'data-href',
+            'data-url',
+            'data-magnet',
+            'data-link',
+            'data-magnet-url'
         ]){
             const m=getMagnet(n.getAttribute?.(k));
             if(m)return m;
         }
 
         const m=getMagnet(n.getAttribute?.('onclick'));
+
         if(m)return m;
 
         n=n.parentElement;
@@ -93,332 +122,427 @@ function domMagnet(el){
     return null;
 }
 
-function parseColor(v){
+/* ---------- THEME ENGINE ---------- */
+
+function rgb(v){
     if(!v)return null;
 
-    v=String(v).trim();
-
-    let m=v.match(/^#([0-9a-f]{3,8})$/i);
-
-    if(m){
-        let x=m[1];
-
-        if(x.length===3||x.length===4)
-            x=x.split('').map(c=>c+c).join('');
-
-        if(x.length===6)x+='ff';
-        if(x.length!==8)return null;
-
-        return[
-            parseInt(x.slice(0,2),16),
-            parseInt(x.slice(2,4),16),
-            parseInt(x.slice(4,6),16),
-            parseInt(x.slice(6,8),16)/255
-        ];
-    }
-
-    m=v.match(
-        /^rgba?\(\s*([\d.]+)\s*[,\s]\s*([\d.]+)\s*[,\s]\s*([\d.]+)(?:\s*[,\/]\s*([\d.]+))?\s*\)$/i
+    const m=String(v).trim().match(
+        /^rgba?\(\s*([\d.]+)\s*[, ]\s*([\d.]+)\s*[, ]\s*([\d.]+)(?:\s*[,\/]\s*([\d.]+))?\s*\)$/i
     );
 
-    if(m){
-        return[
-            +m[1],
-            +m[2],
-            +m[3],
-            m[4]===undefined?1:+m[4]
-        ];
-    }
+    if(!m)return null;
 
-    m=v.match(
-        /^hsla?\(\s*([\d.]+)(?:deg)?\s*[,\s]\s*([\d.]+)%\s*[,\s]\s*([\d.]+)%(?:\s*[,\/]\s*([\d.]+))?\s*\)$/i
+    return[
+        +m[1],
+        +m[2],
+        +m[3],
+        m[4]===undefined?1:+m[4]
+    ];
+}
+
+function hex(v){
+    const m=String(v||'').trim().match(/^#([0-9a-f]+)$/i);
+
+    if(!m)return null;
+
+    let x=m[1];
+
+    if(x.length===3||x.length===4)
+        x=x.split('').map(c=>c+c).join('');
+
+    if(x.length===6)x+='ff';
+
+    if(x.length!==8)return null;
+
+    return[
+        parseInt(x.slice(0,2),16),
+        parseInt(x.slice(2,4),16),
+        parseInt(x.slice(4,6),16),
+        parseInt(x.slice(6,8),16)/255
+    ];
+}
+
+function hsl(v){
+    const m=String(v||'').trim().match(
+        /^hsla?\(\s*([\d.]+)(?:deg)?\s*[, ]\s*([\d.]+)%\s*[, ]\s*([\d.]+)%(?:\s*[,\/]\s*([\d.]+))?\s*\)$/i
     );
 
-    if(m){
-        let h=(+m[1]%360)/360;
-        let s=+m[2]/100;
-        let l=+m[3]/100;
+    if(!m)return null;
 
-        const f=n=>{
-            const k=(n+h*12)%12;
-            return l-s*Math.min(l,1-l)*Math.max(-1,Math.min(k-3,9-k,1));
-        };
+    const h=(+m[1]%360)/360;
+    const s=+m[2]/100;
+    const l=+m[3]/100;
 
-        return[
-            Math.round(f(0)*255),
-            Math.round(f(8)*255),
-            Math.round(f(4)*255),
-            m[4]===undefined?1:+m[4]
-        ];
-    }
+    const f=n=>{
+        const k=(n+h*12)%12;
+        return l-s*Math.min(l,1-l)*Math.max(-1,Math.min(k-3,9-k,1));
+    };
 
-    return null;
+    return[
+        Math.round(f(0)*255),
+        Math.round(f(8)*255),
+        Math.round(f(4)*255),
+        m[4]===undefined?1:+m[4]
+    ];
 }
 
-function lum(c){
-    return c?.[0]*.299+c?.[1]*.587+c?.[2]*.114;
+function parseColor(v){
+    return rgb(v)||hex(v)||hsl(v);
 }
 
-function themeToken(v){
+function luminance(c){
+    return c?
+        c[0]*.299+
+        c[1]*.587+
+        c[2]*.114:
+        null;
+}
+
+function themeWord(v){
     if(!v)return null;
 
     const s=String(v).toLowerCase();
 
     if(
-        /(?:^|[\s_-])(?:dark|darkmode|dark-mode|theme-dark|dark-theme|is-dark|night|night-mode)(?:$|[\s_-])/.test(s)
+        /\bdark\b/.test(s)||
+        /\bdark-mode\b/.test(s)||
+        /\bdarkmode\b/.test(s)||
+        /\btheme-dark\b/.test(s)||
+        /\bdark-theme\b/.test(s)||
+        /\bis-dark\b/.test(s)||
+        /\bnight-mode\b/.test(s)
     )return'dark';
 
     if(
-        /(?:^|[\s_-])(?:light|lightmode|light-mode|theme-light|light-theme|is-light)(?:$|[\s_-])/.test(s)
+        /\blight\b/.test(s)||
+        /\blight-mode\b/.test(s)||
+        /\blightmode\b/.test(s)||
+        /\btheme-light\b/.test(s)||
+        /\blight-theme\b/.test(s)||
+        /\bis-light\b/.test(s)
     )return'light';
 
     return null;
 }
 
-function explicitTheme(){
-    const els=[document.documentElement,document.body].filter(Boolean);
+function scoreExplicit(){
+    let dark=0,light=0;
+
+    const els=[
+        document.documentElement,
+        document.body
+    ].filter(Boolean);
 
     const attrs=[
         'data-theme',
         'data-bs-theme',
         'data-color-scheme',
-        'data-colorscheme',
-        'data-mode',
         'data-color-mode',
+        'data-mode',
         'data-theme-mode',
+        'data-scheme',
         'theme'
     ];
 
     for(const el of els){
         for(const a of attrs){
-            const t=themeToken(el.getAttribute(a));
-            if(t)return t;
+            const t=themeWord(el.getAttribute(a));
+
+            if(t==='dark')dark+=12;
+            if(t==='light')light+=12;
         }
 
-        const t=themeToken(el.className);
-        if(t)return t;
+        const t=themeWord(el.className);
+
+        if(t==='dark')dark+=10;
+        if(t==='light')light+=10;
     }
 
-    const metas=document.querySelectorAll(
-        'meta[name="color-scheme"],meta[name="theme-color"]'
-    );
-
-    for(const m of metas){
-        const t=themeToken(m.content);
-
-        if(t)return t;
-    }
-
-    return null;
+    return[dark,light];
 }
 
-function cssTheme(){
-    const els=[document.documentElement,document.body].filter(Boolean);
-
-    const vars=[
-        '--background',
-        '--bg',
-        '--body-bg',
-        '--page-bg',
-        '--color-bg',
-        '--color-background',
-        '--surface',
-        '--surface-color',
-        '--background-color',
-        '--main-bg',
-        '--theme-background'
-    ];
-
-    for(const el of els){
-        try{
-            const cs=getComputedStyle(el);
-
-            for(const v of vars){
-                let raw=cs.getPropertyValue(v).trim();
-
-                if(!raw)continue;
-
-                let c=parseColor(raw);
-
-                if(!c){
-                    const z=document.createElement('span');
-
-                    z.style.cssText=
-                        `position:absolute!important;width:1px!important;height:1px!important;background:${raw}!important`;
-
-                    el.appendChild(z);
-
-                    c=parseColor(getComputedStyle(z).backgroundColor);
-
-                    z.remove();
-                }
-
-                if(c&&c[3]>.5)
-                    return lum(c)<128?'dark':'light';
-            }
-        }catch(_){}
-    }
-
-    return null;
-}
-
-function rootBackground(){
-    const roots=[
-        document.documentElement,
-        document.body
-    ].filter(Boolean);
-
-    for(const el of roots){
-        try{
-            const c=parseColor(getComputedStyle(el).backgroundColor);
-
-            if(c&&c[3]>.5)
-                return c;
-        }catch(_){}
-    }
-
-    return null;
-}
-
-function largeVisibleBackground(){
-    const found=[];
-
-    for(const el of document.querySelectorAll('body *')){
-        try{
-            const r=el.getBoundingClientRect();
-
-            if(r.width<innerWidth*.7||r.height<innerHeight*.7)
-                continue;
-
-            const s=getComputedStyle(el);
-
-            if(
-                s.display==='none'||
-                s.visibility==='hidden'||
-                +s.opacity===0
-            )continue;
-
-            const c=parseColor(s.backgroundColor);
-
-            if(!c||c[3]<.5)continue;
-
-            const area=r.width*r.height;
-
-            found.push({
-                c,
-                area,
-                z:+s.zIndex||0
-            });
-        }catch(_){}
-    }
-
-    found.sort((a,b)=>b.area-a.area);
-
-    if(found.length)
-        return found[0].c;
-
-    return null;
-}
-
-function cornerBackground(){
-    const pts=[
-        [2,2],
-        [innerWidth-2,2],
-        [2,innerHeight-2],
-        [innerWidth-2,innerHeight-2]
-    ];
-
-    const ls=[];
-
-    for(const p of pts){
-        try{
-            let e=document.elementFromPoint(...p);
-
-            while(e){
-                const s=getComputedStyle(e);
-                const c=parseColor(s.backgroundColor);
-
-                if(c&&c[3]>.5){
-                    ls.push(lum(c));
-                    break;
-                }
-
-                e=e.parentElement;
-            }
-        }catch(_){}
-    }
-
-    if(ls.length){
-        ls.sort((a,b)=>a-b);
-        return ls[ls.length>>1];
-    }
-
-    return null;
-}
-
-function theme(){
-    const t=explicitTheme();
-
-    if(t)return t;
-
-    const c=cssTheme();
-
-    if(c)return c;
-
-    const r=rootBackground();
-
-    if(r){
-        const l=lum(r);
-
-        if(l<115)return'dark';
-        if(l>175)return'light';
-    }
-
-    const b=largeVisibleBackground();
-
-    if(b){
-        const l=lum(b);
-
-        if(l<115)return'dark';
-        if(l>175)return'light';
-    }
-
-    const q=cornerBackground();
-
-    if(q!==null){
-        if(q<115)return'dark';
-        if(q>175)return'light';
-    }
+function scoreColorScheme(){
+    let dark=0,light=0;
 
     try{
-        const cs=getComputedStyle(document.documentElement);
-        const scheme=(cs.colorScheme||'').toLowerCase();
+        const els=[
+            document.documentElement,
+            document.body
+        ].filter(Boolean);
 
-        if(scheme.includes('dark')&&!scheme.includes('light'))
-            return'dark';
+        for(const el of els){
+            const s=getComputedStyle(el)
+                .colorScheme
+                .toLowerCase();
 
-        if(scheme.includes('light')&&!scheme.includes('dark'))
-            return'light';
+            if(s==='dark')dark+=10;
+            else if(s==='light')light+=10;
+            else if(s.includes('dark')&&!s.includes('light'))dark+=7;
+            else if(s.includes('light')&&!s.includes('dark'))light+=7;
+        }
     }catch(_){}
 
     try{
-        const m=document.querySelector('meta[name="color-scheme"]');
+        const m=document.querySelector(
+            'meta[name="color-scheme"]'
+        );
 
         if(m){
             const s=m.content.toLowerCase();
 
-            if(s.includes('dark')&&!s.includes('light'))
-                return'dark';
+            if(s==='dark'||(s.includes('dark')&&!s.includes('light')))
+                dark+=9;
 
-            if(s.includes('light')&&!s.includes('dark'))
-                return'light';
+            if(s==='light'||(s.includes('light')&&!s.includes('dark')))
+                light+=9;
         }
     }catch(_){}
 
-    return matchMedia('(prefers-color-scheme:dark)').matches
-        ?'dark'
-        :'light';
+    return[dark,light];
 }
+
+function scoreCSSVariables(){
+    let dark=0,light=0;
+
+    const names=[
+        '--background',
+        '--bg',
+        '--body-bg',
+        '--page-bg',
+        '--main-bg',
+        '--color-bg',
+        '--color-background',
+        '--background-color',
+        '--surface',
+        '--surface-color',
+        '--card-bg',
+        '--theme-background'
+    ];
+
+    for(const el of [
+        document.documentElement,
+        document.body
+    ].filter(Boolean)){
+        try{
+            const cs=getComputedStyle(el);
+
+            for(const n of names){
+                const c=parseColor(
+                    cs.getPropertyValue(n)
+                );
+
+                if(!c||c[3]<.6)continue;
+
+                const l=luminance(c);
+
+                if(l<90)dark+=5;
+                else if(l>190)light+=5;
+            }
+        }catch(_){}
+    }
+
+    return[dark,light];
+}
+
+function effectiveBackground(el){
+    let alpha=1;
+    let result=null;
+
+    for(let n=el;n;n=n.parentElement){
+        try{
+            const c=parseColor(
+                getComputedStyle(n).backgroundColor
+            );
+
+            if(!c||c[3]<=0)continue;
+
+            if(!result){
+                result=[
+                    c[0],
+                    c[1],
+                    c[2],
+                    c[3]
+                ];
+            }else{
+                const a=c[3];
+
+                result=[
+                    c[0]*a+result[0]*(1-a),
+                    c[1]*a+result[1]*(1-a),
+                    c[2]*a+result[2]*(1-a),
+                    1
+                ];
+            }
+
+            alpha*=1-c[3];
+
+            if(alpha<.03)break;
+        }catch(_){}
+    }
+
+    return result;
+}
+
+function scoreViewport(){
+    let dark=0,light=0;
+
+    const points=[
+        [.03,.03],
+        [.5,.03],
+        [.97,.03],
+        [.03,.5],
+        [.97,.5],
+        [.03,.97],
+        [.5,.97],
+        [.97,.97],
+        [.5,.12],
+        [.5,.88]
+    ];
+
+    for(const [px,py] of points){
+        try{
+            const el=document.elementFromPoint(
+                innerWidth*px,
+                innerHeight*py
+            );
+
+            const c=effectiveBackground(el);
+
+            if(!c)continue;
+
+            const l=luminance(c);
+
+            if(l<75)dark+=3;
+            else if(l>210)light+=3;
+            else if(l<115)dark+=1;
+            else if(l>175)light+=1;
+        }catch(_){}
+    }
+
+    return[dark,light];
+}
+
+function scoreRoot(){
+    let dark=0,light=0;
+
+    for(const el of [
+        document.documentElement,
+        document.body
+    ].filter(Boolean)){
+        try{
+            const c=effectiveBackground(el);
+
+            if(!c)continue;
+
+            const l=luminance(c);
+
+            if(l<75)dark+=9;
+            else if(l<115)dark+=5;
+            else if(l>220)light+=9;
+            else if(l>185)light+=5;
+        }catch(_){}
+    }
+
+    return[dark,light];
+}
+
+function scoreText(){
+    let dark=0,light=0;
+
+    const els=[
+        document.body,
+        document.documentElement
+    ].filter(Boolean);
+
+    for(const el of els){
+        try{
+            const c=parseColor(
+                getComputedStyle(el).color
+            );
+
+            if(!c||c[3]<.6)continue;
+
+            const l=luminance(c);
+
+            /*
+             * Тёмный фон обычно имеет светлый текст,
+             * светлый фон — тёмный.
+             */
+            if(l>205)dark+=3;
+            else if(l<70)light+=3;
+        }catch(_){}
+    }
+
+    return[dark,light];
+}
+
+function detectTheme(force=false){
+    const now=Date.now();
+
+    if(
+        !force&&
+        themeCache&&
+        now-themeTime<1500
+    )return themeCache;
+
+    const scores=[
+        scoreExplicit(),
+        scoreColorScheme(),
+        scoreCSSVariables(),
+        scoreRoot(),
+        scoreViewport(),
+        scoreText()
+    ];
+
+    let dark=0,light=0;
+
+    for(const [d,l] of scores){
+        dark+=d;
+        light+=l;
+    }
+
+    /*
+     * Если есть явное указание темы,
+     * оно имеет приоритет над визуальными эвристиками.
+     */
+    const explicit=scores[0];
+
+    if(Math.abs(explicit[0]-explicit[1])>=8){
+        themeCache=
+            explicit[0]>explicit[1]?'dark':'light';
+
+        themeTime=now;
+
+        return themeCache;
+    }
+
+    /*
+     * Небольшая зона неопределённости.
+     * Не переключаем тему из-за одного случайного элемента.
+     */
+    if(Math.abs(dark-light)<3){
+        const scheme=scores[1];
+
+        if(scheme[0]>scheme[1])
+            dark+=4;
+
+        if(scheme[1]>scheme[0])
+            light+=4;
+    }
+
+    themeCache=dark>light?'dark':'light';
+    themeTime=now;
+
+    return themeCache;
+}
+
+function invalidateTheme(){
+    themeCache=null;
+    themeTime=0;
+}
+
+/* ---------- UI ---------- */
 
 function styles(){
     if($('#'+ID+'style'))return;
@@ -526,11 +650,18 @@ box-shadow:0 8px 30px rgba(0,0,0,.2);
 transition:.2s
 }
 @keyframes ${ID}in{
-from{opacity:0;transform:scale(.96) translateY(-4px)}
-to{opacity:1;transform:scale(1) translateY(0)}
+from{
+opacity:0;
+transform:scale(.96) translateY(-4px)
+}
+to{
+opacity:1;
+transform:scale(1) translateY(0)
+}
 }`;
 
-    (document.head||document.documentElement).appendChild(s);
+    (document.head||document.documentElement)
+        .appendChild(s);
 }
 
 function close(){
@@ -544,10 +675,11 @@ function toast(text){
     const t=document.createElement('div');
 
     t.id=ID+'toast';
-    t.dataset.theme=theme();
+    t.dataset.theme=detectTheme(true);
     t.textContent=text;
 
-    (document.body||document.documentElement).appendChild(t);
+    (document.body||document.documentElement)
+        .appendChild(t);
 
     requestAnimationFrame(()=>{
         t.style.opacity=1;
@@ -581,9 +713,12 @@ async function copy(text){
         const x=document.createElement('textarea');
 
         x.value=text;
-        x.style.cssText='position:fixed;left:-9999px';
 
-        (document.body||document.documentElement).appendChild(x);
+        x.style.cssText=
+            'position:fixed;left:-9999px;top:0';
+
+        (document.body||document.documentElement)
+            .appendChild(x);
 
         x.select();
 
@@ -618,7 +753,7 @@ function button(icon,title,desc,fn){
 }
 
 function showMenu(mag,a){
-    if(!mag)return;
+    if(!mag||!a)return;
 
     close();
     styles();
@@ -626,7 +761,7 @@ function showMenu(mag,a){
     const m=document.createElement('div');
 
     m.id=ID+'menu';
-    m.dataset.theme=theme();
+    m.dataset.theme=detectTheme(true);
 
     const t=document.createElement('div');
 
@@ -670,7 +805,8 @@ function showMenu(mag,a){
 
     m.onclick=e=>e.stopPropagation();
 
-    (document.body||document.documentElement).append(o,m);
+    (document.body||document.documentElement)
+        .append(o,m);
 
     const r=a.getBoundingClientRect();
     const w=Math.min(360,innerWidth-24);
@@ -683,7 +819,10 @@ function showMenu(mag,a){
         y=r.top-h-8;
 
     m.style.left=
-        Math.max(12,Math.min(x,innerWidth-w-12))+'px';
+        Math.max(12,Math.min(
+            x,
+            innerWidth-w-12
+        ))+'px';
 
     m.style.top=
         Math.max(12,y)+'px';
@@ -704,6 +843,8 @@ function openWebtor(mag){
         location.href=WT;
 }
 
+/* ---------- MAGNET EVENTS ---------- */
+
 function clickable(x){
     if(!x?.tagName)return false;
 
@@ -722,13 +863,17 @@ function eventLink(e){
     for(const x of path){
         if(x?.nodeType!==1)continue;
 
-        const m=getMagnet(x.getAttribute?.('href'));
+        const m=getMagnet(
+            x.getAttribute?.('href')
+        );
 
         if(m)return[x,m];
 
         if(!clickable(x))continue;
 
-        const z=reactMagnet(x)||domMagnet(x);
+        const z=
+            reactMagnet(x)||
+            domMagnet(x);
 
         if(z)return[x,z];
 
@@ -738,8 +883,10 @@ function eventLink(e){
             (x.getAttribute?.('data-testid')||'')
         ).toLowerCase();
 
-        if(/magnet|torrent|download|скачать|магнит/.test(s))
-            return[x,null];
+        if(
+            /magnet|torrent|download|скачать|магнит/
+            .test(s)
+        )return[x,null];
     }
 
     return null;
@@ -777,88 +924,119 @@ if(!isWT){
         };
     }catch(_){}
 
-    try{
-        const lp=Location.prototype;
+    document.addEventListener(
+        'click',
+        e=>{
+            if(bypass)return;
 
-        for(const k of ['assign','replace']){
-            const f=lp[k];
+            const x=eventLink(e);
 
-            if(typeof f!=='function')continue;
+            if(!x)return;
 
-            lp[k]=function(url){
-                const m=getMagnet(url);
+            if(x[1]){
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation?.();
 
-                if(m){
-                    captured=m;
-                    return;
-                }
+                showMenu(x[1],x[0]);
+                return;
+            }
 
-                return f.call(this,url);
-            };
-        }
-    }catch(_){}
+            if(
+                x[0].tagName!=='BUTTON'&&
+                x[0].tagName!=='A'&&
+                x[0].getAttribute?.('role')!=='button'&&
+                !x[0].hasAttribute?.('onclick')&&
+                !x[0].hasAttribute?.('data-slot')
+            )return;
 
-    document.addEventListener('click',e=>{
-        if(bypass)return;
+            captured=null;
 
-        const x=eventLink(e);
-
-        if(!x)return;
-
-        if(x[1]){
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation?.();
 
-            showMenu(x[1],x[0]);
-            return;
+            bypass=true;
+
+            try{
+                x[0].click();
+            }catch(_){}
+
+            bypass=false;
+
+            const started=Date.now();
+
+            const wait=setInterval(()=>{
+                if(captured){
+                    clearInterval(wait);
+
+                    const m=captured;
+
+                    captured=null;
+
+                    showMenu(m,x[0]);
+                }else if(Date.now()-started>1500){
+                    clearInterval(wait);
+                    captured=null;
+                }
+            },50);
+        },
+        true
+    );
+
+    document.addEventListener(
+        'keydown',
+        e=>{
+            if(e.key==='Escape')close();
+        },
+        true
+    );
+
+    addEventListener(
+        'resize',
+        ()=>{
+            close();
+            invalidateTheme();
+        },
+        true
+    );
+
+    /*
+     * Если сайт переключает тему без перезагрузки,
+     * следующий клик получает новое определение.
+     */
+    const mo=new MutationObserver(()=>{
+        invalidateTheme();
+    });
+
+    const startObserver=()=>{
+        if(document.documentElement){
+            mo.observe(
+                document.documentElement,
+                {
+                    attributes:true,
+                    attributeFilter:[
+                        'class',
+                        'style',
+                        'data-theme',
+                        'data-bs-theme',
+                        'data-color-scheme',
+                        'data-color-mode',
+                        'data-mode'
+                    ]
+                }
+            );
         }
+    };
 
-        if(
-            x[0].tagName!=='BUTTON'&&
-            x[0].tagName!=='A'&&
-            x[0].getAttribute?.('role')!=='button'&&
-            !x[0].hasAttribute?.('onclick')&&
-            !x[0].hasAttribute?.('data-slot')
-        )return;
-
-        captured=null;
-
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation?.();
-
-        bypass=true;
-
-        try{
-            x[0].click();
-        }catch(_){}
-
-        bypass=false;
-
-        const started=Date.now();
-
-        const wait=setInterval(()=>{
-            if(captured){
-                clearInterval(wait);
-
-                const m=captured;
-
-                captured=null;
-
-                showMenu(m,x[0]);
-            }else if(Date.now()-started>1500){
-                clearInterval(wait);
-                captured=null;
-            }
-        },50);
-    },true);
-
-    document.addEventListener('keydown',e=>{
-        if(e.key==='Escape')close();
-    },true);
-
-    addEventListener('resize',close,true);
+    if(document.documentElement)
+        startObserver();
+    else
+        addEventListener(
+            'DOMContentLoaded',
+            startObserver,
+            {once:true}
+        );
 }
 
 if(isWT){
@@ -874,28 +1052,35 @@ if(isWT){
     }
 
     function findInput(){
-        for(const x of document.querySelectorAll('input,textarea')){
+        for(const x of document.querySelectorAll(
+            'input,textarea'
+        )){
             const s=(
                 (x.placeholder||'')+' '+
                 (x.getAttribute('aria-label')||'')+' '+
                 (x.name||'')
             ).toLowerCase();
 
-            if(/magnet|infohash/.test(s)&&x.offsetParent!==null)
-                return x;
+            if(
+                /magnet|infohash/.test(s)&&
+                x.offsetParent!==null
+            )return x;
         }
 
         return null;
     }
 
     function setValue(x,v){
-        const d=
-            Object.getOwnPropertyDescriptor(
-                Object.getPrototypeOf(x),
-                'value'
-            );
+        const p=Object.getPrototypeOf(x);
+        const d=p&&Object.getOwnPropertyDescriptor(
+            p,
+            'value'
+        );
 
-        d?.set?d.set.call(x,v):x.value=v;
+        if(d?.set)
+            d.set.call(x,v);
+        else
+            x.value=v;
     }
 
     function inject(){
@@ -918,10 +1103,9 @@ if(isWT){
 
         const form=x.closest('form');
 
-        const bs=
-            form?.querySelectorAll(
-                'button,input[type=submit]'
-            )||[];
+        const bs=form?.querySelectorAll(
+            'button,input[type=submit]'
+        )||[];
 
         let b=null;
 
@@ -933,7 +1117,10 @@ if(isWT){
                 ''
             ).toLowerCase();
 
-            if(/найти|search|find|go|открыть/.test(s)){
+            if(
+                /найти|search|find|go|открыть/
+                .test(s)
+            ){
                 b=z;
                 break;
             }
@@ -943,21 +1130,29 @@ if(isWT){
             b=bs[0];
 
         if(b){
-            setTimeout(()=>b.click(),100);
+            setTimeout(
+                ()=>b.click(),
+                100
+            );
         }else if(form?.requestSubmit){
             setTimeout(()=>{
-                try{form.requestSubmit()}catch(_){}
+                try{
+                    form.requestSubmit();
+                }catch(_){}
             },100);
         }else{
             setTimeout(()=>{
                 x.dispatchEvent(
-                    new KeyboardEvent('keydown',{
-                        key:'Enter',
-                        code:'Enter',
-                        keyCode:13,
-                        which:13,
-                        bubbles:true
-                    })
+                    new KeyboardEvent(
+                        'keydown',
+                        {
+                            key:'Enter',
+                            code:'Enter',
+                            keyCode:13,
+                            which:13,
+                            bubbles:true
+                        }
+                    )
                 );
             },100);
         }
