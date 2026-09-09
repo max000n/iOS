@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         Magnet → Webtor.io
 // @namespace    http://tampermonkey.net/
-// @version      4.1
-// @description  Меню для magnet-ссылок: Webtor или копирование. Автоматическая светлая/тёмная тема.
+// @version      5.0
+// @description  Красивое меню для magnet-ссылок: Webtor или копирование. Автоматическая тема сайта.
 // @author       canary_in_a_coleslaw-ChatGPT
 // @match        *://*/*
-// @grant        GM_setClipboard
 // @grant        GM_setValue
 // @grant        GM_getValue
-// @grant        GM_deleteValue
+// @grant        GM_setClipboard
 // @grant        GM_addStyle
 // @run-at       document-start
 // ==/UserScript==
@@ -16,95 +15,128 @@
 (function () {
     'use strict';
 
-    const WEBTOR_HOST = 'webtor.io';
-    const STORAGE_KEY = 'webtor_magnet';
+    // =========================================================
+    // НАСТРОЙКИ
+    // =========================================================
 
-    const isWebtor =
-        location.hostname === WEBTOR_HOST ||
-        location.hostname.endsWith('.' + WEBTOR_HOST);
+    const STORAGE_KEY = 'wt_pending_magnet';
+
+    const WEBTOR_URL = 'https://webtor.io/ru/';
+
+    const MENU_ID = 'wt-magnet-menu';
+
+    const TOAST_ID = 'wt-magnet-toast';
+
 
     // =========================================================
-    // СТИЛИ
+    // ОПРЕДЕЛЯЕМ WEBTOR
+    // =========================================================
+
+    const hostname =
+        window.location.hostname.toLowerCase();
+
+    const isWebtor =
+        hostname === 'webtor.io' ||
+        hostname.endsWith('.webtor.io');
+
+
+    // =========================================================
+    // CSS
     // =========================================================
 
     GM_addStyle(`
         /* =====================================================
-           ОСНОВНОЕ МЕНЮ
+           MENU
            ===================================================== */
 
-        #wt-magnet-menu {
-            --wt-bg: rgba(255, 255, 255, 0.98);
-            --wt-border: rgba(0, 0, 0, 0.10);
+        #${MENU_ID} {
+            --wt-bg: rgba(255,255,255,.97);
+            --wt-border: rgba(0,0,0,.10);
             --wt-text: #1c1c1e;
-            --wt-secondary: rgba(0, 0, 0, 0.48);
-            --wt-icon-bg: rgba(0, 0, 0, 0.055);
-            --wt-hover: rgba(0, 0, 0, 0.065);
-            --wt-active: rgba(0, 0, 0, 0.10);
+            --wt-secondary: rgba(0,0,0,.48);
+            --wt-hover: rgba(0,0,0,.055);
+            --wt-active: rgba(0,0,0,.10);
+            --wt-icon-bg: rgba(0,0,0,.055);
 
             position: fixed;
+
             z-index: 2147483647;
 
             width: 320px;
             max-width: calc(100vw - 20px);
 
-            padding: 8px;
-
             box-sizing: border-box;
 
-            background: var(--wt-bg);
-            border: 1px solid var(--wt-border);
-            border-radius: 16px;
+            padding: 8px;
 
-            box-shadow:
-                0 18px 50px rgba(0,0,0,.20),
-                0 5px 18px rgba(0,0,0,.12);
+            background: var(--wt-bg);
+
+            border:
+                1px solid var(--wt-border);
+
+            border-radius: 17px;
 
             color: var(--wt-text);
 
             font-family:
                 -apple-system,
                 BlinkMacSystemFont,
-                "SF Pro Text",
                 "SF Pro Display",
+                "SF Pro Text",
                 "Segoe UI",
                 sans-serif;
 
-            backdrop-filter: blur(18px);
-            -webkit-backdrop-filter: blur(18px);
+            box-shadow:
+                0 20px 55px rgba(0,0,0,.20),
+                0 5px 18px rgba(0,0,0,.10);
+
+            backdrop-filter:
+                blur(22px)
+                saturate(180%);
+
+            -webkit-backdrop-filter:
+                blur(22px)
+                saturate(180%);
 
             animation:
-                wtMenuShow .15s ease-out;
+                wt-menu-in .14s
+                cubic-bezier(.2,.8,.2,1);
+
+            user-select: none;
+            -webkit-user-select: none;
         }
 
 
         /* =====================================================
-           ТЁМНАЯ ТЕМА
+           DARK
            ===================================================== */
 
-        #wt-magnet-menu.wt-dark {
-            --wt-bg: rgba(30, 30, 32, 0.98);
+        #${MENU_ID}.wt-dark {
+            --wt-bg: rgba(30,30,32,.97);
             --wt-border: rgba(255,255,255,.13);
-            --wt-text: #ffffff;
-            --wt-secondary: rgba(255,255,255,.43);
+            --wt-text: #fff;
+            --wt-secondary: rgba(255,255,255,.48);
+            --wt-hover: rgba(255,255,255,.075);
+            --wt-active: rgba(255,255,255,.13);
             --wt-icon-bg: rgba(255,255,255,.09);
-            --wt-hover: rgba(255,255,255,.09);
-            --wt-active: rgba(255,255,255,.15);
 
             box-shadow:
-                0 18px 50px rgba(0,0,0,.50),
-                0 5px 18px rgba(0,0,0,.30);
+                0 20px 55px rgba(0,0,0,.50),
+                0 5px 20px rgba(0,0,0,.35);
         }
 
 
         /* =====================================================
-           ЗАГОЛОВОК
+           TITLE
            ===================================================== */
 
-        #wt-magnet-menu .wt-title {
+        #${MENU_ID} .wt-title {
             padding:
                 9px 12px 8px;
 
             font-size: 12px;
+            line-height: 16px;
+
             font-weight: 600;
 
             color: var(--wt-secondary);
@@ -112,105 +144,133 @@
 
 
         /* =====================================================
-           КНОПКИ
+           BUTTON
            ===================================================== */
 
-        #wt-magnet-menu .wt-button {
+        #${MENU_ID} .wt-button {
+            display: flex;
+
             width: 100%;
 
-            display: flex;
+            box-sizing: border-box;
+
             align-items: center;
 
-            padding: 11px 10px;
-            margin: 2px 0;
+            padding:
+                10px;
+
+            margin:
+                2px 0;
 
             border: 0;
-            border-radius: 11px;
+
+            border-radius: 12px;
+
+            outline: none;
 
             background: transparent;
+
             color: var(--wt-text);
+
+            font-family: inherit;
 
             text-align: left;
 
             cursor: pointer;
 
-            font-family: inherit;
-
-            -webkit-tap-highlight-color: transparent;
+            -webkit-tap-highlight-color:
+                transparent;
 
             transition:
                 background .12s ease,
                 transform .12s ease;
         }
 
-        #wt-magnet-menu .wt-button:hover {
-            background: var(--wt-hover);
+
+        #${MENU_ID} .wt-button:hover {
+            background:
+                var(--wt-hover);
         }
 
-        #wt-magnet-menu .wt-button:active {
-            background: var(--wt-active);
-            transform: scale(.985);
+
+        #${MENU_ID} .wt-button:active {
+            background:
+                var(--wt-active);
+
+            transform:
+                scale(.985);
         }
 
 
         /* =====================================================
-           ИКОНКИ
+           ICON
            ===================================================== */
 
-        #wt-magnet-menu .wt-icon {
-            width: 38px;
-            height: 38px;
-
-            flex: 0 0 38px;
-
+        #${MENU_ID} .wt-icon {
             display: flex;
+
             align-items: center;
             justify-content: center;
 
+            flex: 0 0 40px;
+
+            width: 40px;
+            height: 40px;
+
             margin-right: 12px;
 
-            border-radius: 11px;
+            border-radius: 12px;
 
-            background: var(--wt-icon-bg);
+            background:
+                var(--wt-icon-bg);
 
-            font-size: 18px;
+            font-size: 19px;
         }
 
 
         /* =====================================================
-           ТЕКСТ
+           TEXT
            ===================================================== */
 
-        #wt-magnet-menu .wt-text {
+        #${MENU_ID} .wt-text {
             display: flex;
+
+            min-width: 0;
+
             flex-direction: column;
 
-            gap: 3px;
+            gap: 2px;
         }
 
-        #wt-magnet-menu .wt-main {
+
+        #${MENU_ID} .wt-main {
             font-size: 14px;
-            font-weight: 600;
             line-height: 18px;
 
-            color: var(--wt-text);
+            font-weight: 600;
+
+            color:
+                var(--wt-text);
         }
 
-        #wt-magnet-menu .wt-sub {
-            font-size: 11px;
-            line-height: 14px;
 
-            color: var(--wt-secondary);
+        #${MENU_ID} .wt-sub {
+            font-size: 11px;
+            line-height: 15px;
+
+            color:
+                var(--wt-secondary);
         }
 
 
         /* =====================================================
-           АНИМАЦИЯ МЕНЮ
+           MENU ANIMATION
            ===================================================== */
 
-        @keyframes wtMenuShow {
+        @keyframes wt-menu-in {
             from {
                 opacity: 0;
+
                 transform:
                     scale(.96)
                     translateY(-5px);
@@ -218,6 +278,7 @@
 
             to {
                 opacity: 1;
+
                 transform:
                     scale(1)
                     translateY(0);
@@ -229,25 +290,30 @@
            TOAST
            ===================================================== */
 
-        #wt-toast {
+        #${TOAST_ID} {
             position: fixed;
+
             z-index: 2147483647;
 
             left: 50%;
             bottom: 28px;
 
-            transform: translateX(-50%);
+            transform:
+                translateX(-50%);
 
-            padding: 12px 18px;
+            padding:
+                11px 17px;
 
-            background: rgba(30,30,32,.98);
-            border: 1px solid rgba(255,255,255,.13);
+            border:
+                1px solid
+                rgba(255,255,255,.13);
+
             border-radius: 13px;
 
-            box-shadow:
-                0 8px 30px rgba(0,0,0,.4);
+            background:
+                rgba(30,30,32,.97);
 
-            color: white;
+            color: #fff;
 
             font-family:
                 -apple-system,
@@ -260,21 +326,28 @@
 
             white-space: nowrap;
 
+            box-shadow:
+                0 10px 35px
+                rgba(0,0,0,.35);
+
             pointer-events: none;
 
             animation:
-                wtToastShow .18s ease-out;
+                wt-toast-in .16s ease-out;
         }
 
-        @keyframes wtToastShow {
+
+        @keyframes wt-toast-in {
             from {
                 opacity: 0;
+
                 transform:
                     translate(-50%, 8px);
             }
 
             to {
                 opacity: 1;
+
                 transform:
                     translate(-50%, 0);
             }
@@ -283,13 +356,14 @@
 
 
     // =========================================================
-    // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+    // ОБЩИЕ ФУНКЦИИ
     // =========================================================
 
     function closeMenu() {
+
         const menu =
             document.getElementById(
-                'wt-magnet-menu'
+                MENU_ID
             );
 
         if (menu) {
@@ -300,20 +374,20 @@
 
     function showToast(text) {
 
-        const old =
+        const oldToast =
             document.getElementById(
-                'wt-toast'
+                TOAST_ID
             );
 
-        if (old) {
-            old.remove();
+        if (oldToast) {
+            oldToast.remove();
         }
 
         const toast =
             document.createElement('div');
 
         toast.id =
-            'wt-toast';
+            TOAST_ID;
 
         toast.textContent =
             text;
@@ -322,152 +396,217 @@
             toast
         );
 
-        setTimeout(() => {
+        window.setTimeout(
+            function () {
 
-            if (toast.parentNode) {
-                toast.remove();
-            }
+                if (toast.isConnected) {
+                    toast.remove();
+                }
 
-        }, 1800);
+            },
+            1800
+        );
     }
 
 
     // =========================================================
-    // ОПРЕДЕЛЕНИЕ RGB
+    // ПОЛУЧЕНИЕ ССЫЛКИ ИЗ CLICK EVENT
+    //
+    // composedPath() лучше обычного target.closest(),
+    // особенно для динамических элементов.
     // =========================================================
 
-    function parseColor(color) {
+    function findMagnetFromEvent(event) {
 
-        if (!color) {
-            return null;
-        }
+        const path =
+            typeof event.composedPath === 'function'
+                ? event.composedPath()
+                : [event.target];
 
-        color =
-            color.trim().toLowerCase();
 
-        // -----------------------------------------------------
-        // rgb() / rgba()
-        // -----------------------------------------------------
+        for (
+            let i = 0;
+            i < path.length;
+            i++
+        ) {
 
-        const rgbMatch =
-            color.match(
-                /^rgba?\\(\\s*
-                    ([\\d.]+)
-                    \\s*,\\s*
-                    ([\\d.]+)
-                    \\s*,\\s*
-                    ([\\d.]+)
-                    (?:\\s*,\\s*
-                    ([\\d.]+))?
-                    \\s*\\)$/x
-            );
+            const element =
+                path[i];
 
-        if (rgbMatch) {
-
-            return {
-                r: Number(rgbMatch[1]),
-                g: Number(rgbMatch[2]),
-                b: Number(rgbMatch[3]),
-                a:
-                    rgbMatch[4] !== undefined
-                        ? Number(rgbMatch[4])
-                        : 1
-            };
-        }
-
-        // -----------------------------------------------------
-        // HEX
-        // -----------------------------------------------------
-
-        const hex =
-            color.match(
-                /^#([0-9a-f]{3,8})$/i
-            );
-
-        if (hex) {
-
-            let value =
-                hex[1];
-
-            if (value.length === 3) {
-
-                value =
-                    value
-                        .split('')
-                        .map(x => x + x)
-                        .join('');
-            }
 
             if (
-                value.length === 6 ||
-                value.length === 8
+                !element ||
+                element.nodeType !== 1
             ) {
+                continue;
+            }
 
-                return {
-                    r: parseInt(
-                        value.substring(0, 2),
-                        16
-                    ),
 
-                    g: parseInt(
-                        value.substring(2, 4),
-                        16
-                    ),
+            if (
+                element.tagName !== 'A'
+            ) {
+                continue;
+            }
 
-                    b: parseInt(
-                        value.substring(4, 6),
-                        16
-                    ),
 
-                    a:
-                        value.length === 8
-                            ? parseInt(
-                                value.substring(6, 8),
-                                16
-                            ) / 255
-                            : 1
-                };
+            const href =
+                element.getAttribute(
+                    'href'
+                );
+
+
+            if (!href) {
+                continue;
+            }
+
+
+            const value =
+                href.trim();
+
+
+            if (
+                value
+                    .toLowerCase()
+                    .startsWith('magnet:')
+            ) {
+                return value;
             }
         }
+
 
         return null;
     }
 
 
     // =========================================================
-    // СМЕШИВАНИЕ ЦВЕТА С БЕЛЫМ
+    // ЦВЕТ
     // =========================================================
 
-    function blendWithWhite(color) {
+    function parseRGB(value) {
 
-        if (!color) {
+        if (!value) {
             return null;
         }
 
-        if (color.a >= 0.99) {
-            return color;
+        const match =
+            value.match(
+                /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\s*\)$/i
+            );
+
+
+        if (!match) {
+            return null;
         }
 
+
         return {
-            r:
-                color.r * color.a +
-                255 * (1 - color.a),
-
-            g:
-                color.g * color.a +
-                255 * (1 - color.a),
-
-            b:
-                color.b * color.a +
-                255 * (1 - color.a),
-
-            a: 1
+            r: Number(match[1]),
+            g: Number(match[2]),
+            b: Number(match[3]),
+            a:
+                match[4] !== undefined
+                    ? Number(match[4])
+                    : 1
         };
     }
 
 
+    function parseHex(value) {
+
+        if (!value) {
+            return null;
+        }
+
+
+        const match =
+            value.match(
+                /^#([0-9a-f]{3,8})$/i
+            );
+
+
+        if (!match) {
+            return null;
+        }
+
+
+        let hex =
+            match[1];
+
+
+        if (hex.length === 3) {
+
+            hex =
+                hex
+                    .split('')
+                    .map(
+                        function (x) {
+                            return x + x;
+                        }
+                    )
+                    .join('');
+        }
+
+
+        if (
+            hex.length !== 6 &&
+            hex.length !== 8
+        ) {
+            return null;
+        }
+
+
+        return {
+            r:
+                parseInt(
+                    hex.substring(0, 2),
+                    16
+                ),
+
+            g:
+                parseInt(
+                    hex.substring(2, 4),
+                    16
+                ),
+
+            b:
+                parseInt(
+                    hex.substring(4, 6),
+                    16
+                ),
+
+            a:
+                hex.length === 8
+                    ? parseInt(
+                        hex.substring(6, 8),
+                        16
+                    ) / 255
+                    : 1
+        };
+    }
+
+
+    function parseColor(value) {
+
+        if (!value) {
+            return null;
+        }
+
+
+        const rgb =
+            parseRGB(value);
+
+
+        if (rgb) {
+            return rgb;
+        }
+
+
+        return parseHex(value);
+    }
+
+
     // =========================================================
-    // АНАЛИЗ ФОНА
+    // ЯРКОСТЬ ФОНА
     // =========================================================
 
     function getBackgroundBrightness() {
@@ -478,80 +617,96 @@
         const body =
             document.body;
 
+
         if (!html) {
             return null;
         }
 
+
         const htmlStyle =
-            getComputedStyle(html);
+            window.getComputedStyle(
+                html
+            );
+
 
         const bodyStyle =
             body
-                ? getComputedStyle(body)
+                ? window.getComputedStyle(body)
                 : null;
 
-        // -----------------------------------------------------
-        // Сначала body
-        // -----------------------------------------------------
 
-        let bg =
-            bodyStyle
-                ? parseColor(
+        let color = null;
+
+
+        if (bodyStyle) {
+
+            color =
+                parseColor(
                     bodyStyle.backgroundColor
-                )
-                : null;
+                );
+        }
 
-        // -----------------------------------------------------
-        // Если body прозрачный — html
-        // -----------------------------------------------------
+
+        /*
+         * Если body прозрачный,
+         * смотрим html.
+         */
 
         if (
-            !bg ||
-            bg.a < 0.05
+            !color ||
+            color.a < 0.05
         ) {
 
-            bg =
+            color =
                 parseColor(
                     htmlStyle.backgroundColor
                 );
         }
 
-        // -----------------------------------------------------
-        // Если цвет найден
-        // -----------------------------------------------------
 
-        if (bg) {
-
-            bg =
-                blendWithWhite(bg);
-
-            /*
-             * Формула относительной яркости.
-             *
-             * Не идеальная цветометрия,
-             * но для определения светлая/тёмная
-             * подходит очень хорошо.
-             */
-
-            const brightness =
-                (
-                    bg.r * 299 +
-                    bg.g * 587 +
-                    bg.b * 114
-                ) / 1000;
-
-            return brightness;
+        if (!color) {
+            return null;
         }
 
-        return null;
+
+        /*
+         * Учитываем прозрачность:
+         * прозрачный цвет смешиваем
+         * с белым фоном.
+         */
+
+        if (color.a < 1) {
+
+            color = {
+
+                r:
+                    color.r * color.a +
+                    255 * (1 - color.a),
+
+                g:
+                    color.g * color.a +
+                    255 * (1 - color.a),
+
+                b:
+                    color.b * color.a +
+                    255 * (1 - color.a)
+            };
+        }
+
+
+        return (
+            color.r * 299 +
+            color.g * 587 +
+            color.b * 114
+        ) / 1000;
     }
 
 
     // =========================================================
-    // ОПРЕДЕЛЕНИЕ ТЕМЫ САЙТА
+    // ОПРЕДЕЛЕНИЕ ТЕМЫ
     // =========================================================
 
-    function detectSiteTheme() {
+    function detectTheme() {
 
         const html =
             document.documentElement;
@@ -559,50 +714,62 @@
         const body =
             document.body;
 
+
         if (!html) {
             return 'light';
         }
 
 
-        // =====================================================
-        // 1. CSS color-scheme
-        // =====================================================
-
         const htmlStyle =
-            getComputedStyle(html);
+            window.getComputedStyle(
+                html
+            );
+
 
         const bodyStyle =
             body
-                ? getComputedStyle(body)
+                ? window.getComputedStyle(body)
                 : null;
+
+
+        // =====================================================
+        // 1. ЯВНЫЙ color-scheme
+        // =====================================================
 
         const colorScheme =
             (
                 htmlStyle.colorScheme ||
-                bodyStyle?.colorScheme ||
+                (
+                    bodyStyle
+                        ? bodyStyle.colorScheme
+                        : ''
+                ) ||
                 ''
-            ).toLowerCase();
+            )
+                .trim()
+                .toLowerCase();
+
 
         /*
-         * Если сайт явно говорит dark,
-         * доверяем ему.
+         * Важно:
+         *
+         * "dark light" означает, что сайт поддерживает
+         * обе темы, а не что сейчас используется dark.
+         *
+         * Поэтому принимаем только однозначные значения.
          */
 
         if (
-            colorScheme.includes('dark') &&
-            !colorScheme.includes('light')
+            colorScheme === 'dark' ||
+            colorScheme === 'only dark'
         ) {
             return 'dark';
         }
 
-        /*
-         * Если сайт явно говорит light,
-         * доверяем ему.
-         */
 
         if (
-            colorScheme.includes('light') &&
-            !colorScheme.includes('dark')
+            colorScheme === 'light' ||
+            colorScheme === 'only light'
         ) {
             return 'light';
         }
@@ -622,34 +789,52 @@
                 'data-color-scheme'
             ),
 
-            body?.getAttribute(
-                'data-theme'
-            ),
+            body
+                ? body.getAttribute(
+                    'data-theme'
+                )
+                : null,
 
-            body?.getAttribute(
-                'data-color-scheme'
-            )
+            body
+                ? body.getAttribute(
+                    'data-color-scheme'
+                )
+                : null
 
-        ]
-            .filter(Boolean)
-            .map(
-                value =>
-                    value.toLowerCase()
-            );
+        ];
 
 
         for (
-            const theme
-            of themeValues
+            let i = 0;
+            i < themeValues.length;
+            i++
         ) {
 
+            const value =
+                themeValues[i];
+
+
+            if (!value) {
+                continue;
+            }
+
+
+            const theme =
+                value
+                    .trim()
+                    .toLowerCase();
+
+
             if (
+                theme === 'dark' ||
                 theme.includes('dark')
             ) {
                 return 'dark';
             }
 
+
             if (
+                theme === 'light' ||
                 theme.includes('light')
             ) {
                 return 'light';
@@ -658,30 +843,51 @@
 
 
         // =====================================================
-        // 3. CSS-классы dark/light
+        // 3. КЛАССЫ
         // =====================================================
 
-        const classes = [
+        const classNames = [];
 
-            ...html.classList,
 
-            ...(body
-                ? [...body.classList]
-                : [])
+        for (
+            let i = 0;
+            i < html.classList.length;
+            i++
+        ) {
 
-        ]
-            .map(
-                value =>
-                    value.toLowerCase()
+            classNames.push(
+                html.classList[i]
+                    .toLowerCase()
             );
+        }
+
+
+        if (body) {
+
+            for (
+                let i = 0;
+                i < body.classList.length;
+                i++
+            ) {
+
+                classNames.push(
+                    body.classList[i]
+                        .toLowerCase()
+                );
+            }
+        }
 
 
         if (
-            classes.some(
-                value =>
-                    value === 'dark' ||
-                    value.includes('dark-mode') ||
-                    value.includes('theme-dark')
+            classNames.some(
+                function (name) {
+
+                    return (
+                        name === 'dark' ||
+                        name === 'dark-mode' ||
+                        name === 'theme-dark'
+                    );
+                }
             )
         ) {
             return 'dark';
@@ -689,11 +895,15 @@
 
 
         if (
-            classes.some(
-                value =>
-                    value === 'light' ||
-                    value.includes('light-mode') ||
-                    value.includes('theme-light')
+            classNames.some(
+                function (name) {
+
+                    return (
+                        name === 'light' ||
+                        name === 'light-mode' ||
+                        name === 'theme-light'
+                    );
+                }
             )
         ) {
             return 'light';
@@ -701,30 +911,23 @@
 
 
         // =====================================================
-        // 4. Анализ реального цвета фона
+        // 4. РЕАЛЬНЫЙ ФОН
         // =====================================================
 
         const brightness =
             getBackgroundBrightness();
 
+
         if (
             brightness !== null
         ) {
-
-            /*
-             * < 110 = явно тёмный
-             *
-             * > 170 = явно светлый
-             *
-             * Между ними считаем неопределённым
-             * и идём дальше.
-             */
 
             if (
                 brightness < 110
             ) {
                 return 'dark';
             }
+
 
             if (
                 brightness > 170
@@ -735,7 +938,7 @@
 
 
         // =====================================================
-        // 5. Системная тема
+        // 5. СИСТЕМНАЯ ТЕМА
         // =====================================================
 
         if (
@@ -748,192 +951,92 @@
         }
 
 
-        // =====================================================
-        // 6. По умолчанию
-        // =====================================================
-
         return 'light';
     }
 
 
     // =========================================================
-    // ПОЛУЧЕНИЕ MAGNET
+    // ПОЗИЦИЯ МЕНЮ
     // =========================================================
 
-    function getMagnetFromTarget(target) {
-
-        let element =
-            target;
-
-        if (
-            element &&
-            element.nodeType !== 1
-        ) {
-            element =
-                element.parentElement;
-        }
-
-        if (!element) {
-            return null;
-        }
-
-        const link =
-            element.closest
-                ? element.closest('a')
-                : null;
-
-        if (!link) {
-            return null;
-        }
-
-        const href =
-            link.getAttribute(
-                'href'
-            );
-
-        if (!href) {
-            return null;
-        }
-
-        const magnet =
-            href.trim();
-
-        if (
-            magnet
-                .toLowerCase()
-                .startsWith('magnet:')
-        ) {
-            return magnet;
-        }
-
-        return null;
-    }
-
-
-    // =========================================================
-    // WEBTOR URL
-    // =========================================================
-
-    function makeWebtorUrl(magnet) {
-
-        return (
-            'https://webtor.io/ru/' +
-            '#wt-magnet=' +
-            encodeURIComponent(
-                magnet
-            )
-        );
-    }
-
-
-    // =========================================================
-    // ОТКРЫТЬ WEBTOR В НОВОЙ ВКЛАДКЕ
-    // =========================================================
-
-    function openWebtor(magnet) {
-
-        try {
-
-            GM_setValue(
-                STORAGE_KEY,
-                magnet
-            );
-
-        } catch (e) {
-
-            console.warn(
-                '[Webtor] Storage error',
-                e
-            );
-        }
-
-        const url =
-            makeWebtorUrl(
-                magnet
-            );
+    function positionMenu(
+        menu,
+        x,
+        y
+    ) {
 
         /*
-         * Открываем непосредственно
-         * по нажатию пользователя.
-         *
-         * Это важно для Safari/iOS.
+         * Сначала делаем его видимым,
+         * чтобы получить размеры.
          */
 
-        const tab =
-            window.open(
-                url,
-                '_blank'
-            );
+        const rect =
+            menu.getBoundingClientRect();
+
+
+        const margin = 10;
+
+
+        let left =
+            Number(x) || margin;
+
+
+        let top =
+            Number(y) || margin;
+
 
         /*
-         * Если Safari заблокировал
-         * открытие новой вкладки —
-         * переходим в текущей.
+         * Справа не хватает места.
          */
 
-        if (!tab) {
-            location.href =
-                url;
-        }
-    }
-
-
-    // =========================================================
-    // КОПИРОВАНИЕ
-    // =========================================================
-
-    function copyMagnet(magnet) {
-
-        try {
-
-            GM_setClipboard(
-                magnet,
-                'text'
-            );
-
-            showToast(
-                '📋 Magnet-ссылка скопирована'
-            );
-
-            return;
-
-        } catch (e) {
-
-            console.warn(
-                '[Webtor] Clipboard error',
-                e
-            );
-        }
-
-
         if (
-            navigator.clipboard &&
-            navigator.clipboard.writeText
+            left + rect.width >
+            window.innerWidth - margin
         ) {
 
-            navigator.clipboard
-                .writeText(magnet)
-                .then(() => {
-
-                    showToast(
-                        '📋 Magnet-ссылка скопирована'
-                    );
-
-                })
-                .catch(() => {
-
-                    showToast(
-                        '❌ Не удалось скопировать'
-                    );
-
-                });
-
-        } else {
-
-            showToast(
-                '❌ Буфер обмена недоступен'
-            );
+            left =
+                window.innerWidth -
+                rect.width -
+                margin;
         }
+
+
+        /*
+         * Снизу не хватает места.
+         */
+
+        if (
+            top + rect.height >
+            window.innerHeight - margin
+        ) {
+
+            top =
+                window.innerHeight -
+                rect.height -
+                margin;
+        }
+
+
+        left =
+            Math.max(
+                margin,
+                left
+            );
+
+
+        top =
+            Math.max(
+                margin,
+                top
+            );
+
+
+        menu.style.left =
+            left + 'px';
+
+
+        menu.style.top =
+            top + 'px';
     }
 
 
@@ -949,13 +1052,21 @@
 
         closeMenu();
 
+
+        if (!document.body) {
+            return;
+        }
+
+
         const menu =
             document.createElement(
                 'div'
             );
 
+
         menu.id =
-            'wt-magnet-menu';
+            MENU_ID;
+
 
         menu.innerHTML = `
 
@@ -964,9 +1075,9 @@
             </div>
 
             <button
-                class="wt-button"
                 type="button"
-                id="wt-open-button"
+                class="wt-button"
+                data-action="webtor"
             >
 
                 <span class="wt-icon">
@@ -989,9 +1100,9 @@
 
 
             <button
-                class="wt-button"
                 type="button"
-                id="wt-copy-button"
+                class="wt-button"
+                data-action="copy"
             >
 
                 <span class="wt-icon">
@@ -1015,15 +1126,13 @@
 
 
         // =====================================================
-        // ПРИМЕНЯЕМ ТЕМУ САЙТА
+        // ТЕМА
         // =====================================================
 
-        const theme =
-            detectSiteTheme();
-
         if (
-            theme === 'dark'
+            detectTheme() === 'dark'
         ) {
+
             menu.classList.add(
                 'wt-dark'
             );
@@ -1035,119 +1144,201 @@
         );
 
 
-        // =====================================================
-        // ПОЗИЦИОНИРОВАНИЕ
-        // =====================================================
-
-        const width =
-            menu.offsetWidth;
-
-        const height =
-            menu.offsetHeight;
-
-        let left =
-            x;
-
-        let top =
-            y;
-
-
-        if (
-            left + width >
-            window.innerWidth - 10
-        ) {
-
-            left =
-                window.innerWidth -
-                width -
-                10;
-        }
-
-
-        if (
-            top + height >
-            window.innerHeight - 10
-        ) {
-
-            top =
-                window.innerHeight -
-                height -
-                10;
-        }
-
-
-        left =
-            Math.max(
-                10,
-                left
-            );
-
-        top =
-            Math.max(
-                10,
-                top
-            );
-
-
-        menu.style.left =
-            left + 'px';
-
-        menu.style.top =
-            top + 'px';
+        positionMenu(
+            menu,
+            x,
+            y
+        );
 
 
         // =====================================================
-        // ОТКРЫТЬ WEBTOR
+        // ЕДИНСТВЕННЫЙ ОБРАБОТЧИК МЕНЮ
         // =====================================================
 
-        document
-            .getElementById(
-                'wt-open-button'
-            )
-            .addEventListener(
-                'click',
-                function (e) {
+        menu.addEventListener(
+            'click',
+            function (event) {
 
-                    e.preventDefault();
-                    e.stopPropagation();
+                const button =
+                    event.target.closest(
+                        'button[data-action]'
+                    );
 
-                    /*
-                     * Сначала открываем новую вкладку,
-                     * пока Safari ещё считает это
-                     * пользовательским действием.
-                     */
+
+                if (!button) {
+                    return;
+                }
+
+
+                event.preventDefault();
+                event.stopPropagation();
+
+
+                const action =
+                    button.getAttribute(
+                        'data-action'
+                    );
+
+
+                closeMenu();
+
+
+                if (
+                    action === 'webtor'
+                ) {
 
                     openWebtor(
                         magnet
                     );
 
-                    closeMenu();
+                    return;
                 }
-            );
 
 
-        // =====================================================
-        // КОПИРОВАТЬ
-        // =====================================================
-
-        document
-            .getElementById(
-                'wt-copy-button'
-            )
-            .addEventListener(
-                'click',
-                function (e) {
-
-                    e.preventDefault();
-                    e.stopPropagation();
+                if (
+                    action === 'copy'
+                ) {
 
                     copyMagnet(
                         magnet
                     );
-
-                    closeMenu();
                 }
+            }
+        );
+    }
+
+
+    // =========================================================
+    // ОТКРЫТИЕ WEBTOR
+    // =========================================================
+
+    function openWebtor(magnet) {
+
+        /*
+         * Сохраняем ПОЛНУЮ оригинальную magnet-ссылку.
+         *
+         * Никакого hash,
+         * никакого infohash,
+         * никакого обрезания параметров.
+         */
+
+        try {
+
+            GM_setValue(
+                STORAGE_KEY,
+                magnet
             );
+
+        } catch (error) {
+
+            console.error(
+                '[Magnet → Webtor] Не удалось сохранить magnet:',
+                error
+            );
+        }
+
+
+        /*
+         * ВАЖНО:
+         *
+         * Открываем обычную страницу Webtor.
+         *
+         * Раньше здесь использовался специальный URL
+         * вида /hash или #wt-magnet=...
+         *
+         * Именно это могло приводить к
+         * "Ресурс не найден".
+         */
+
+        const newWindow =
+            window.open(
+                WEBTOR_URL,
+                '_blank'
+            );
+
+
+        /*
+         * Safari может заблокировать новую вкладку.
+         *
+         * В таком случае открываем Webtor
+         * в текущей вкладке.
+         */
+
+        if (
+            !newWindow ||
+            newWindow.closed
+        ) {
+
+            window.location.href =
+                WEBTOR_URL;
+        }
+    }
+
+
+    // =========================================================
+    // КОПИРОВАНИЕ MAGNET
+    // =========================================================
+
+    function copyMagnet(magnet) {
+
+        try {
+
+            GM_setClipboard(
+                magnet,
+                'text'
+            );
+
+            showToast(
+                '📋 Magnet-ссылка скопирована'
+            );
+
+            return;
+
+        } catch (error) {
+
+            console.warn(
+                '[Magnet → Webtor] GM clipboard error:',
+                error
+            );
+        }
+
+
+        /*
+         * Резервный вариант.
+         */
+
+        if (
+            navigator.clipboard &&
+            typeof navigator.clipboard.writeText ===
+                'function'
+        ) {
+
+            navigator.clipboard
+                .writeText(magnet)
+                .then(
+                    function () {
+
+                        showToast(
+                            '📋 Magnet-ссылка скопирована'
+                        );
+                    }
+                )
+                .catch(
+                    function () {
+
+                        showToast(
+                            '❌ Не удалось скопировать ссылку'
+                        );
+                    }
+                );
+
+            return;
+        }
+
+
+        showToast(
+            '❌ Буфер обмена недоступен'
+        );
     }
 
 
@@ -1155,16 +1346,33 @@
     // ПЕРЕХВАТ MAGNET
     // =========================================================
 
-    if (!isWebtor) {
+    function installMagnetHandler() {
 
         document.addEventListener(
             'click',
-            function (e) {
+            function (event) {
+
+                /*
+                 * Уже открыто наше меню —
+                 * ничего не перехватываем.
+                 */
+
+                if (
+                    event.target &&
+                    event.target.closest &&
+                    event.target.closest(
+                        '#' + MENU_ID
+                    )
+                ) {
+                    return;
+                }
+
 
                 const magnet =
-                    getMagnetFromTarget(
-                        e.target
+                    findMagnetFromEvent(
+                        event
                     );
+
 
                 if (!magnet) {
                     return;
@@ -1172,37 +1380,58 @@
 
 
                 /*
-                 * Safari не должен пытаться
-                 * открыть magnet самостоятельно.
+                 * Полностью блокируем штатную обработку
+                 * magnet-ссылки браузером/сайтом.
                  */
 
-                e.preventDefault();
-                e.stopPropagation();
+                event.preventDefault();
+                event.stopPropagation();
+
 
                 if (
-                    e.stopImmediatePropagation
+                    typeof event.stopImmediatePropagation ===
+                    'function'
                 ) {
-                    e.stopImmediatePropagation();
+
+                    event.stopImmediatePropagation();
                 }
 
+
+                /*
+                 * Координаты клика.
+                 */
 
                 let x =
-                    typeof e.clientX === 'number'
-                        ? e.clientX
-                        : 20;
+                    Number(event.clientX);
+
 
                 let y =
-                    typeof e.clientY === 'number'
-                        ? e.clientY
-                        : 20;
+                    Number(event.clientY);
 
 
-                if (x === 0) {
-                    x = 20;
+                /*
+                 * Если событие пришло без координат,
+                 * показываем меню сверху по центру.
+                 */
+
+                if (
+                    !Number.isFinite(x) ||
+                    x <= 0
+                ) {
+
+                    x =
+                        Math.round(
+                            window.innerWidth / 2
+                        ) - 160;
                 }
 
-                if (y === 0) {
-                    y = 20;
+
+                if (
+                    !Number.isFinite(y) ||
+                    y <= 0
+                ) {
+
+                    y = 80;
                 }
 
 
@@ -1219,141 +1448,96 @@
 
 
     // =========================================================
-    // ЗАКРЫТЬ МЕНЮ ПРИ КЛИКЕ СНАРУЖИ
+    // ЗАКРЫТИЕ МЕНЮ
     // =========================================================
 
-    document.addEventListener(
-        'click',
-        function (e) {
+    function installMenuCloseHandler() {
 
-            const menu =
-                document.getElementById(
-                    'wt-magnet-menu'
-                );
+        document.addEventListener(
+            'click',
+            function (event) {
 
-            if (!menu) {
-                return;
-            }
-
-            if (
-                !menu.contains(
-                    e.target
-                )
-            ) {
-                closeMenu();
-            }
-
-        },
-        false
-    );
-
-
-    // =========================================================
-    // ESC
-    // =========================================================
-
-    document.addEventListener(
-        'keydown',
-        function (e) {
-
-            if (
-                e.key === 'Escape'
-            ) {
-                closeMenu();
-            }
-
-        }
-    );
-
-
-    // =========================================================
-    // WEBTOR — ПОЛУЧИТЬ MAGNET
-    // =========================================================
-
-    async function getWebtorMagnet() {
-
-        // -----------------------------------------------------
-        // Сначала hash.
-        // -----------------------------------------------------
-
-        try {
-
-            const prefix =
-                '#wt-magnet=';
-
-            if (
-                location.hash
-                    .startsWith(prefix)
-            ) {
-
-                const encoded =
-                    location.hash.substring(
-                        prefix.length
+                const menu =
+                    document.getElementById(
+                        MENU_ID
                     );
 
-                const magnet =
-                    decodeURIComponent(
-                        encoded
-                    );
+
+                if (!menu) {
+                    return;
+                }
+
 
                 if (
-                    magnet
-                        .toLowerCase()
-                        .startsWith(
-                            'magnet:'
-                        )
+                    !menu.contains(
+                        event.target
+                    )
                 ) {
-                    return magnet;
+
+                    closeMenu();
+                }
+
+            },
+            false
+        );
+
+
+        document.addEventListener(
+            'keydown',
+            function (event) {
+
+                if (
+                    event.key === 'Escape'
+                ) {
+
+                    closeMenu();
                 }
             }
-
-        } catch (e) {
-
-            console.warn(
-                '[Webtor] Hash error',
-                e
-            );
-        }
-
-
-        // -----------------------------------------------------
-        // Потом storage.
-        // -----------------------------------------------------
-
-        try {
-
-            const magnet =
-                await GM_getValue(
-                    STORAGE_KEY,
-                    ''
-                );
-
-            if (
-                magnet &&
-                magnet
-                    .toLowerCase()
-                    .startsWith(
-                        'magnet:'
-                    )
-            ) {
-                return magnet;
-            }
-
-        } catch (e) {
-
-            console.warn(
-                '[Webtor] Storage error',
-                e
-            );
-        }
-
-
-        return null;
+        );
     }
 
 
     // =========================================================
-    // WEBTOR — НАЙТИ INPUT
+    // WEBTOR: ПОИСК MAGNET
+    // =========================================================
+
+    function getPendingMagnet() {
+
+        try {
+
+            const magnet =
+                GM_getValue(
+                    STORAGE_KEY,
+                    ''
+                );
+
+
+            if (
+                typeof magnet === 'string' &&
+                magnet
+                    .trim()
+                    .toLowerCase()
+                    .startsWith('magnet:')
+            ) {
+
+                return magnet.trim();
+            }
+
+        } catch (error) {
+
+            console.error(
+                '[Magnet → Webtor] GM_getValue error:',
+                error
+            );
+        }
+
+
+        return '';
+    }
+
+
+    // =========================================================
+    // WEBTOR: НАЙТИ INPUT
     // =========================================================
 
     function findWebtorInput() {
@@ -1365,9 +1549,14 @@
 
 
         for (
-            const input
-            of inputs
+            let i = 0;
+            i < inputs.length;
+            i++
         ) {
+
+            const input =
+                inputs[i];
+
 
             const placeholder =
                 (
@@ -1376,6 +1565,7 @@
                     ) || ''
                 )
                     .toLowerCase();
+
 
             const aria =
                 (
@@ -1386,22 +1576,23 @@
                     .toLowerCase();
 
 
-            if (
-                placeholder.includes(
-                    'magnet'
-                ) ||
-                placeholder.includes(
-                    'infohash'
-                ) ||
-                placeholder.includes(
-                    'магнет'
-                ) ||
-                aria.includes(
-                    'magnet'
-                ) ||
-                aria.includes(
-                    'infohash'
+            const name =
+                (
+                    input.getAttribute(
+                        'name'
+                    ) || ''
                 )
+                    .toLowerCase();
+
+
+            if (
+                placeholder.includes('magnet') ||
+                placeholder.includes('infohash') ||
+                placeholder.includes('магнет') ||
+                aria.includes('magnet') ||
+                aria.includes('infohash') ||
+                name.includes('magnet') ||
+                name.includes('infohash')
             ) {
 
                 return input;
@@ -1414,24 +1605,28 @@
 
 
     // =========================================================
-    // WEBTOR — НАЙТИ КНОПКУ
+    // WEBTOR: НАЙТИ КНОПКУ
     // =========================================================
 
-    function findSearchButton(input) {
+    function findWebtorButton(input) {
 
         if (!input) {
             return null;
         }
 
 
+        /*
+         * Сначала ищем кнопку рядом с input.
+         */
+
         let parent =
             input.parentElement;
 
 
         for (
-            let i = 0;
-            i < 5 && parent;
-            i++
+            let level = 0;
+            level < 6 && parent;
+            level++
         ) {
 
             const buttons =
@@ -1441,13 +1636,17 @@
 
 
             for (
-                const button
-                of buttons
+                let i = 0;
+                i < buttons.length;
+                i++
             ) {
 
+                const button =
+                    buttons[i];
+
+
                 if (
-                    button.offsetParent !==
-                    null
+                    button.offsetParent !== null
                 ) {
 
                     return button;
@@ -1460,20 +1659,26 @@
         }
 
 
-        // -----------------------------------------------------
-        // Запасной поиск по тексту.
-        // -----------------------------------------------------
+        /*
+         * Если рядом ничего нет,
+         * ищем кнопку по тексту.
+         */
 
-        const buttons =
+        const allButtons =
             document.querySelectorAll(
                 'button'
             );
 
 
         for (
-            const button
-            of buttons
+            let i = 0;
+            i < allButtons.length;
+            i++
         ) {
+
+            const button =
+                allButtons[i];
+
 
             const text =
                 (
@@ -1487,7 +1692,9 @@
             if (
                 text === 'найти' ||
                 text === 'search' ||
-                text.includes('найти')
+                text === 'suchen' ||
+                text.includes('найти') ||
+                text.includes('search')
             ) {
 
                 return button;
@@ -1500,10 +1707,10 @@
 
 
     // =========================================================
-    // WEBTOR — УСТАНОВИТЬ VALUE
+    // WEBTOR: ПРАВИЛЬНО УСТАНОВИТЬ VALUE
     // =========================================================
 
-    function setInputValue(
+    function setNativeInputValue(
         input,
         value
     ) {
@@ -1517,7 +1724,8 @@
 
         if (
             descriptor &&
-            descriptor.set
+            typeof descriptor.set ===
+                'function'
         ) {
 
             descriptor.set.call(
@@ -1531,6 +1739,11 @@
                 value;
         }
 
+
+        /*
+         * React / Vue / другие фреймворки
+         * должны увидеть изменение.
+         */
 
         input.dispatchEvent(
             new Event(
@@ -1554,10 +1767,86 @@
 
 
     // =========================================================
-    // WEBTOR — ПЕРЕДАТЬ MAGNET
+    // WEBTOR: ОТПРАВКА MAGNET
     // =========================================================
 
-    async function processWebtor() {
+    function submitWebtorMagnet(
+        input,
+        magnet
+    ) {
+
+        setNativeInputValue(
+            input,
+            magnet
+        );
+
+
+        /*
+         * Небольшая задержка нужна,
+         * чтобы React/Vue/Webtor успел
+         * обновить внутреннее состояние.
+         */
+
+        window.setTimeout(
+            function () {
+
+                const button =
+                    findWebtorButton(
+                        input
+                    );
+
+
+                if (button) {
+
+                    button.click();
+
+                    return;
+                }
+
+
+                /*
+                 * Если кнопку найти не удалось —
+                 * используем Enter.
+                 */
+
+                input.dispatchEvent(
+                    new KeyboardEvent(
+                        'keydown',
+                        {
+                            key: 'Enter',
+                            code: 'Enter',
+                            keyCode: 13,
+                            which: 13,
+                            bubbles: true
+                        }
+                    )
+                );
+
+
+                input.dispatchEvent(
+                    new KeyboardEvent(
+                        'keyup',
+                        {
+                            key: 'Enter',
+                            code: 'Enter',
+                            keyCode: 13,
+                            which: 13,
+                            bubbles: true
+                        }
+                    )
+                );
+
+            },
+            350
+        );
+    }
+
+
+    // =========================================================
+    // WEBTOR: ЗАПУСК
+    // =========================================================
+
+    function processWebtor() {
 
         if (!isWebtor) {
             return;
@@ -1565,7 +1854,7 @@
 
 
         const magnet =
-            await getWebtorMagnet();
+            getPendingMagnet();
 
 
         if (!magnet) {
@@ -1573,12 +1862,14 @@
         }
 
 
-        let attempts =
-            0;
+        let attempts = 0;
+
+
+        const maxAttempts = 120;
 
 
         const timer =
-            setInterval(
+            window.setInterval(
                 function () {
 
                     attempts++;
@@ -1588,97 +1879,54 @@
                         findWebtorInput();
 
 
-                    if (!input) {
+                    if (input) {
 
-                        if (
-                            attempts >= 100
-                        ) {
+                        window.clearInterval(
+                            timer
+                        );
 
-                            clearInterval(
-                                timer
-                            );
-                        }
+
+                        submitWebtorMagnet(
+                            input,
+                            magnet
+                        );
+
+
+                        /*
+                         * Удаляем сохранённую ссылку
+                         * только после того, как она
+                         * реально передана Webtor.
+                         */
+
+                        window.setTimeout(
+                            function () {
+
+                                try {
+
+                                    GM_setValue(
+                                        STORAGE_KEY,
+                                        ''
+                                    );
+
+                                } catch (error) {}
+
+                            },
+                            2000
+                        );
+
 
                         return;
                     }
 
 
-                    clearInterval(
-                        timer
-                    );
+                    if (
+                        attempts >= maxAttempts
+                    ) {
 
-
-                    // -------------------------------------------------
-                    // Вставляем оригинальный magnet.
-                    // -------------------------------------------------
-
-                    setInputValue(
-                        input,
-                        magnet
-                    );
-
-
-                    // -------------------------------------------------
-                    // Даём Webtor обновить состояние.
-                    // -------------------------------------------------
-
-                    setTimeout(
-                        function () {
-
-                            const button =
-                                findSearchButton(
-                                    input
-                                );
-
-
-                            if (button) {
-
-                                button.click();
-
-                            } else {
-
-                                input.dispatchEvent(
-                                    new KeyboardEvent(
-                                        'keydown',
-                                        {
-                                            key: 'Enter',
-                                            code: 'Enter',
-                                            keyCode: 13,
-                                            which: 13,
-                                            bubbles: true
-                                        }
-                                    )
-                                );
-                            }
-
-
-                            // -------------------------------------------------
-                            // Убираем hash.
-                            // -------------------------------------------------
-
-                            try {
-
-                                history.replaceState(
-                                    null,
-                                    '',
-                                    location.pathname +
-                                    location.search
-                                );
-
-                            } catch (e) {}
-
-
-                            try {
-
-                                GM_deleteValue(
-                                    STORAGE_KEY
-                                );
-
-                            } catch (e) {}
-
-                        },
-                        500
-                    );
+                        window.clearInterval(
+                            timer
+                        );
+                    }
 
                 },
                 150
@@ -1687,10 +1935,27 @@
 
 
     // =========================================================
-    // ЗАПУСК WEBTOR
+    // ИНИЦИАЛИЗАЦИЯ
     // =========================================================
 
-    if (isWebtor) {
+    if (!isWebtor) {
+
+        /*
+         * На обычных сайтах только один
+         * обработчик magnet-ссылок.
+         */
+
+        installMagnetHandler();
+
+        installMenuCloseHandler();
+
+    } else {
+
+        /*
+         * На Webtor никакого обработчика magnet
+         * не устанавливаем — только принимаем
+         * сохранённую ссылку.
+         */
 
         if (
             document.readyState ===
