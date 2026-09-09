@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Magnet → Webtor.io
 // @namespace    http://tampermonkey.net/
-// @version      8.0
+// @version      8.1
 // @description  Перехват magnet-ссылок, меню Webtor и копирование
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -40,12 +40,10 @@ function scan(o,d=0,seen=new Set()){
         try{
             const v=o[k],m=getMagnet(v);
             if(m)return m;
-
             const x=scan(v,d+1,seen);
             if(x)return x;
         }catch(_){}
     }
-
     return null;
 }
 
@@ -58,11 +56,7 @@ function reactMagnet(el){
 
             try{
                 const r=n[k];
-                const m=
-                    scan(r?.memoizedProps)||
-                    scan(r?.pendingProps)||
-                    scan(r);
-
+                const m=scan(r?.memoizedProps)||scan(r?.pendingProps)||scan(r);
                 if(m)return m;
             }catch(_){}
         }
@@ -83,14 +77,8 @@ function domMagnet(el){
         }
 
         for(const k of [
-            'value',
-            'href',
-            'src',
-            'data-href',
-            'data-url',
-            'data-magnet',
-            'data-link',
-            'data-magnet-url'
+            'value','href','src','data-href','data-url',
+            'data-magnet','data-link','data-magnet-url'
         ]){
             const m=getMagnet(n.getAttribute?.(k));
             if(m)return m;
@@ -105,57 +93,186 @@ function domMagnet(el){
     return null;
 }
 
-function color(s){
-    const m=String(s||'').match(
-        /rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*\/\s*([\d.]+)|\s*,\s*([\d.]+))?\s*\)/i
+function parseColor(v){
+    if(!v)return null;
+
+    v=String(v).trim();
+
+    let m=v.match(/^#([0-9a-f]{3,8})$/i);
+
+    if(m){
+        let x=m[1];
+
+        if(x.length===3||x.length===4)
+            x=x.split('').map(c=>c+c).join('');
+
+        if(x.length===6)x+='ff';
+        if(x.length!==8)return null;
+
+        return[
+            parseInt(x.slice(0,2),16),
+            parseInt(x.slice(2,4),16),
+            parseInt(x.slice(4,6),16),
+            parseInt(x.slice(6,8),16)/255
+        ];
+    }
+
+    m=v.match(
+        /^rgba?\(\s*([\d.]+)\s*[,\s]\s*([\d.]+)\s*[,\s]\s*([\d.]+)(?:\s*[,\/]\s*([\d.]+))?\s*\)$/i
     );
 
-    if(!m)return null;
+    if(m){
+        return[
+            +m[1],
+            +m[2],
+            +m[3],
+            m[4]===undefined?1:+m[4]
+        ];
+    }
 
-    const a=m[4]??m[5];
+    m=v.match(
+        /^hsla?\(\s*([\d.]+)(?:deg)?\s*[,\s]\s*([\d.]+)%\s*[,\s]\s*([\d.]+)%(?:\s*[,\/]\s*([\d.]+))?\s*\)$/i
+    );
 
-    return [
-        +m[1],
-        +m[2],
-        +m[3],
-        a===undefined?1:+a
-    ];
-}
+    if(m){
+        let h=(+m[1]%360)/360;
+        let s=+m[2]/100;
+        let l=+m[3]/100;
 
-function hex(s){
-    const m=String(s||'').trim().match(/^#([0-9a-f]{3,8})$/i);
-    if(!m)return null;
+        const f=n=>{
+            const k=(n+h*12)%12;
+            return l-s*Math.min(l,1-l)*Math.max(-1,Math.min(k-3,9-k,1));
+        };
 
-    let x=m[1];
+        return[
+            Math.round(f(0)*255),
+            Math.round(f(8)*255),
+            Math.round(f(4)*255),
+            m[4]===undefined?1:+m[4]
+        ];
+    }
 
-    if(x.length===3||x.length===4)
-        x=x.split('').map(c=>c+c).join('');
-
-    if(x.length===6)x+='ff';
-    if(x.length!==8)return null;
-
-    return [
-        parseInt(x.slice(0,2),16),
-        parseInt(x.slice(2,4),16),
-        parseInt(x.slice(4,6),16),
-        parseInt(x.slice(6,8),16)/255
-    ];
-}
-
-function parseColor(s){
-    return color(s)||hex(s);
+    return null;
 }
 
 function lum(c){
     return c?.[0]*.299+c?.[1]*.587+c?.[2]*.114;
 }
 
-function paintBg(e){
-    for(let n=e;n;n=n.parentElement){
-        try{
-            const c=parseColor(getComputedStyle(n).backgroundColor);
+function themeToken(v){
+    if(!v)return null;
 
-            if(c&&c[3]>.05)
+    const s=String(v).toLowerCase();
+
+    if(
+        /(?:^|[\s_-])(?:dark|darkmode|dark-mode|theme-dark|dark-theme|is-dark|night|night-mode)(?:$|[\s_-])/.test(s)
+    )return'dark';
+
+    if(
+        /(?:^|[\s_-])(?:light|lightmode|light-mode|theme-light|light-theme|is-light)(?:$|[\s_-])/.test(s)
+    )return'light';
+
+    return null;
+}
+
+function explicitTheme(){
+    const els=[document.documentElement,document.body].filter(Boolean);
+
+    const attrs=[
+        'data-theme',
+        'data-bs-theme',
+        'data-color-scheme',
+        'data-colorscheme',
+        'data-mode',
+        'data-color-mode',
+        'data-theme-mode',
+        'theme'
+    ];
+
+    for(const el of els){
+        for(const a of attrs){
+            const t=themeToken(el.getAttribute(a));
+            if(t)return t;
+        }
+
+        const t=themeToken(el.className);
+        if(t)return t;
+    }
+
+    const metas=document.querySelectorAll(
+        'meta[name="color-scheme"],meta[name="theme-color"]'
+    );
+
+    for(const m of metas){
+        const t=themeToken(m.content);
+
+        if(t)return t;
+    }
+
+    return null;
+}
+
+function cssTheme(){
+    const els=[document.documentElement,document.body].filter(Boolean);
+
+    const vars=[
+        '--background',
+        '--bg',
+        '--body-bg',
+        '--page-bg',
+        '--color-bg',
+        '--color-background',
+        '--surface',
+        '--surface-color',
+        '--background-color',
+        '--main-bg',
+        '--theme-background'
+    ];
+
+    for(const el of els){
+        try{
+            const cs=getComputedStyle(el);
+
+            for(const v of vars){
+                let raw=cs.getPropertyValue(v).trim();
+
+                if(!raw)continue;
+
+                let c=parseColor(raw);
+
+                if(!c){
+                    const z=document.createElement('span');
+
+                    z.style.cssText=
+                        `position:absolute!important;width:1px!important;height:1px!important;background:${raw}!important`;
+
+                    el.appendChild(z);
+
+                    c=parseColor(getComputedStyle(z).backgroundColor);
+
+                    z.remove();
+                }
+
+                if(c&&c[3]>.5)
+                    return lum(c)<128?'dark':'light';
+            }
+        }catch(_){}
+    }
+
+    return null;
+}
+
+function rootBackground(){
+    const roots=[
+        document.documentElement,
+        document.body
+    ].filter(Boolean);
+
+    for(const el of roots){
+        try{
+            const c=parseColor(getComputedStyle(el).backgroundColor);
+
+            if(c&&c[3]>.5)
                 return c;
         }catch(_){}
     }
@@ -163,74 +280,52 @@ function paintBg(e){
     return null;
 }
 
-function theme(){
-    const h=document.documentElement,b=document.body;
+function largeVisibleBackground(){
+    const found=[];
 
-    const attrs=[
-        h?.getAttribute('data-theme'),
-        h?.getAttribute('data-color-scheme'),
-        b?.getAttribute('data-theme'),
-        b?.getAttribute('data-color-scheme')
-    ].filter(Boolean).join(' ').toLowerCase();
-
-    if(/\bdark\b/.test(attrs)&&!/\blight\b/.test(attrs))
-        return'dark';
-
-    if(/\blight\b/.test(attrs)&&!/\bdark\b/.test(attrs))
-        return'light';
-
-    const cls=(
-        String(h?.className||'')+
-        ' '+
-        String(b?.className||'')
-    ).toLowerCase();
-
-    if(/(?:^|\s)(?:dark|theme-dark|dark-mode)(?:\s|$)/.test(cls))
-        return'dark';
-
-    if(/(?:^|\s)(?:light|theme-light|light-mode)(?:\s|$)/.test(cls))
-        return'light';
-
-    for(const e of [b,h]){
-        if(!e)continue;
-
+    for(const el of document.querySelectorAll('body *')){
         try{
-            const cs=getComputedStyle(e);
-            const scheme=(cs.colorScheme||'').toLowerCase();
+            const r=el.getBoundingClientRect();
 
-            if(scheme==='dark')return'dark';
-            if(scheme==='light')return'light';
+            if(r.width<innerWidth*.7||r.height<innerHeight*.7)
+                continue;
 
-            const names=[
-                '--background',
-                '--bg',
-                '--body-bg',
-                '--color-bg',
-                '--color-background',
-                '--page-bg',
-                '--surface'
-            ];
+            const s=getComputedStyle(el);
 
-            for(const n of names){
-                const c=parseColor(cs.getPropertyValue(n));
+            if(
+                s.display==='none'||
+                s.visibility==='hidden'||
+                +s.opacity===0
+            )continue;
 
-                if(c&&c[3]>.05)
-                    return lum(c)<128?'dark':'light';
-            }
+            const c=parseColor(s.backgroundColor);
+
+            if(!c||c[3]<.5)continue;
+
+            const area=r.width*r.height;
+
+            found.push({
+                c,
+                area,
+                z:+s.zIndex||0
+            });
         }catch(_){}
     }
 
-    let c=paintBg(b)||paintBg(h);
+    found.sort((a,b)=>b.area-a.area);
 
-    if(c)
-        return lum(c)<128?'dark':'light';
+    if(found.length)
+        return found[0].c;
 
+    return null;
+}
+
+function cornerBackground(){
     const pts=[
-        [4,4],
-        [innerWidth-4,4],
-        [4,innerHeight-4],
-        [innerWidth-4,innerHeight-4],
-        [innerWidth/2,8]
+        [2,2],
+        [innerWidth-2,2],
+        [2,innerHeight-2],
+        [innerWidth-2,innerHeight-2]
     ];
 
     const ls=[];
@@ -238,26 +333,91 @@ function theme(){
     for(const p of pts){
         try{
             let e=document.elementFromPoint(...p);
-            c=paintBg(e);
 
-            if(c)
-                ls.push(lum(c));
+            while(e){
+                const s=getComputedStyle(e);
+                const c=parseColor(s.backgroundColor);
+
+                if(c&&c[3]>.5){
+                    ls.push(lum(c));
+                    break;
+                }
+
+                e=e.parentElement;
+            }
         }catch(_){}
     }
 
     if(ls.length){
         ls.sort((a,b)=>a-b);
-        return ls[ls.length>>1]<128?'dark':'light';
+        return ls[ls.length>>1];
+    }
+
+    return null;
+}
+
+function theme(){
+    const t=explicitTheme();
+
+    if(t)return t;
+
+    const c=cssTheme();
+
+    if(c)return c;
+
+    const r=rootBackground();
+
+    if(r){
+        const l=lum(r);
+
+        if(l<115)return'dark';
+        if(l>175)return'light';
+    }
+
+    const b=largeVisibleBackground();
+
+    if(b){
+        const l=lum(b);
+
+        if(l<115)return'dark';
+        if(l>175)return'light';
+    }
+
+    const q=cornerBackground();
+
+    if(q!==null){
+        if(q<115)return'dark';
+        if(q>175)return'light';
     }
 
     try{
-        const c=parseColor(getComputedStyle(b||h).color);
+        const cs=getComputedStyle(document.documentElement);
+        const scheme=(cs.colorScheme||'').toLowerCase();
 
-        if(c)
-            return lum(c)>160?'dark':'light';
+        if(scheme.includes('dark')&&!scheme.includes('light'))
+            return'dark';
+
+        if(scheme.includes('light')&&!scheme.includes('dark'))
+            return'light';
     }catch(_){}
 
-    return'light';
+    try{
+        const m=document.querySelector('meta[name="color-scheme"]');
+
+        if(m){
+            const s=m.content.toLowerCase();
+
+            if(s.includes('dark')&&!s.includes('light'))
+                return'dark';
+
+            if(s.includes('light')&&!s.includes('dark'))
+                return'light';
+        }
+    }catch(_){}
+
+    return matchMedia('(prefers-color-scheme:dark)').matches
+        ?'dark'
+        :'light';
 }
 
 function styles(){
@@ -276,7 +436,6 @@ background:rgba(0,0,0,.12);
 backdrop-filter:blur(2px);
 -webkit-backdrop-filter:blur(2px)
 }
-
 #${ID}menu{
 position:fixed;
 z-index:2147483647;
@@ -289,7 +448,6 @@ box-shadow:0 14px 45px rgba(0,0,0,.25);
 border:1px solid transparent;
 animation:${ID}in .15s ease-out
 }
-
 #${ID}menu[data-theme=light],
 #${ID}toast[data-theme=light]{
 background:rgba(255,255,255,.97);
@@ -297,7 +455,6 @@ color:#171717;
 border-color:rgba(0,0,0,.1);
 color-scheme:light
 }
-
 #${ID}menu[data-theme=dark],
 #${ID}toast[data-theme=dark]{
 background:rgba(32,32,36,.97);
@@ -305,18 +462,15 @@ color:#fff;
 border-color:rgba(255,255,255,.12);
 color-scheme:dark
 }
-
 #${ID}title{
 padding:9px 12px 7px;
 font-weight:700
 }
-
 #${ID}sub{
 padding:0 12px 9px;
 font-size:12px;
 opacity:.6
 }
-
 .${ID}btn{
 width:100%;
 display:flex;
@@ -331,15 +485,12 @@ font:600 14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
 text-align:left;
 cursor:pointer
 }
-
 .${ID}btn:hover{
 background:rgba(127,127,127,.14)
 }
-
 .${ID}btn:active{
 transform:scale(.985)
 }
-
 .${ID}icon{
 width:27px;
 height:27px;
@@ -348,11 +499,9 @@ place-items:center;
 flex:none;
 font-size:18px
 }
-
 .${ID}txt{
 flex:1
 }
-
 .${ID}desc{
 display:block;
 margin-top:2px;
@@ -360,7 +509,6 @@ font-size:11px;
 font-weight:400;
 opacity:.55
 }
-
 #${ID}toast{
 position:fixed;
 left:50%;
@@ -377,16 +525,9 @@ pointer-events:none;
 box-shadow:0 8px 30px rgba(0,0,0,.2);
 transition:.2s
 }
-
 @keyframes ${ID}in{
-from{
-opacity:0;
-transform:scale(.96) translateY(-4px)
-}
-to{
-opacity:1;
-transform:scale(1) translateY(0)
-}
+from{opacity:0;transform:scale(.96) translateY(-4px)}
+to{opacity:1;transform:scale(1) translateY(0)}
 }`;
 
     (document.head||document.documentElement).appendChild(s);
@@ -512,6 +653,7 @@ function showMenu(mag,a){
             'Скопировать в буфер обмена',
             async()=>{
                 close();
+
                 toast(
                     await copy(mag)
                     ?'Magnet-ссылка скопирована 📋'
@@ -723,13 +865,13 @@ if(isWT){
 
     let done=false;
 
-    const pending=()=>{
+    function pending(){
         try{
             return GM_getValue(KEY,'');
         }catch(_){
             return'';
         }
-    };
+    }
 
     function findInput(){
         for(const x of document.querySelectorAll('input,textarea')){
@@ -739,10 +881,8 @@ if(isWT){
                 (x.name||'')
             ).toLowerCase();
 
-            if(
-                /magnet|infohash/.test(s)&&
-                x.offsetParent!==null
-            )return x;
+            if(/magnet|infohash/.test(s)&&x.offsetParent!==null)
+                return x;
         }
 
         return null;
@@ -806,9 +946,7 @@ if(isWT){
             setTimeout(()=>b.click(),100);
         }else if(form?.requestSubmit){
             setTimeout(()=>{
-                try{
-                    form.requestSubmit();
-                }catch(_){}
+                try{form.requestSubmit()}catch(_){}
             },100);
         }else{
             setTimeout(()=>{
