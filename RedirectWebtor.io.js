@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Magnet Links → Webtor.io
 // @namespace    http://tampermonkey.net/
-// @version      2.0
-// @description  Красивое меню для magnet-ссылок: открыть в Webtor.io или скопировать ссылку.
+// @version      2.1
+// @description  Показывает меню для magnet-ссылок: открыть в Webtor.io или скопировать.
 // @author       canary_in_a_coleslaw-ChatGPT
 // @match        *://*/*
 // @grant        GM_setClipboard
@@ -13,130 +13,127 @@
     'use strict';
 
     // =========================================================
-    // СТИЛИ МЕНЮ
+    // СТИЛИ
     // =========================================================
 
     GM_addStyle(`
         #webtor-magnet-menu {
             position: fixed;
             z-index: 2147483647;
-            min-width: 300px;
+            width: 310px;
+            box-sizing: border-box;
             padding: 8px;
-            background: rgba(25, 25, 28, 0.98);
+            background: rgba(28, 28, 30, 0.98);
             border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 14px;
+            border-radius: 16px;
             box-shadow:
-                0 12px 40px rgba(0, 0, 0, 0.45),
-                0 4px 12px rgba(0, 0, 0, 0.25);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
+                0 15px 45px rgba(0, 0, 0, 0.45),
+                0 5px 15px rgba(0, 0, 0, 0.25);
             font-family:
                 -apple-system,
                 BlinkMacSystemFont,
+                "SF Pro Display",
+                "SF Pro Text",
                 "Segoe UI",
-                Roboto,
-                Arial,
                 sans-serif;
             color: #fff;
-            animation: webtorMenuIn 0.15s ease-out;
+            overflow: hidden;
+            animation: webtorMenuIn .16s ease-out;
         }
 
         @keyframes webtorMenuIn {
             from {
                 opacity: 0;
-                transform: translateY(-5px) scale(0.98);
+                transform: scale(.96) translateY(-5px);
             }
+
             to {
                 opacity: 1;
-                transform: translateY(0) scale(1);
+                transform: scale(1) translateY(0);
             }
         }
 
-        #webtor-magnet-menu .webtor-menu-title {
-            padding: 8px 12px 7px;
-            font-size: 13px;
+        #webtor-magnet-menu .webtor-title {
+            padding: 9px 12px 8px;
+            color: rgba(255,255,255,.45);
+            font-size: 12px;
             font-weight: 600;
-            color: rgba(255, 255, 255, 0.5);
         }
 
         #webtor-magnet-menu button {
             width: 100%;
+            box-sizing: border-box;
             display: flex;
             align-items: center;
             gap: 12px;
-            padding: 11px 12px;
+            padding: 11px 10px;
             margin: 2px 0;
             border: 0;
-            border-radius: 10px;
+            border-radius: 11px;
             background: transparent;
-            color: #fff;
-            cursor: pointer;
+            color: white;
             text-align: left;
-            font-size: 14px;
-            transition:
-                background 0.12s ease,
-                transform 0.12s ease;
-        }
-
-        #webtor-magnet-menu button:hover {
-            background: rgba(255, 255, 255, 0.10);
+            cursor: pointer;
+            -webkit-tap-highlight-color: transparent;
         }
 
         #webtor-magnet-menu button:active {
-            transform: scale(0.98);
+            background: rgba(255,255,255,.12);
         }
 
         #webtor-magnet-menu .webtor-icon {
-            width: 32px;
-            height: 32px;
+            width: 36px;
+            height: 36px;
+            flex: 0 0 36px;
             display: flex;
             align-items: center;
             justify-content: center;
-            flex-shrink: 0;
-            border-radius: 9px;
-            background: rgba(255, 255, 255, 0.08);
-            font-size: 17px;
+            border-radius: 10px;
+            background: rgba(255,255,255,.09);
+            font-size: 18px;
         }
 
         #webtor-magnet-menu .webtor-text {
+            min-width: 0;
             display: flex;
             flex-direction: column;
-            gap: 2px;
+            gap: 3px;
         }
 
         #webtor-magnet-menu .webtor-main {
-            font-weight: 600;
             font-size: 14px;
+            font-weight: 600;
+            line-height: 18px;
         }
 
         #webtor-magnet-menu .webtor-sub {
             font-size: 11px;
-            color: rgba(255, 255, 255, 0.45);
+            line-height: 14px;
+            color: rgba(255,255,255,.43);
         }
 
         #webtor-magnet-toast {
             position: fixed;
             z-index: 2147483647;
             left: 50%;
-            bottom: 25px;
+            bottom: 28px;
             transform: translateX(-50%);
-            padding: 11px 17px;
-            background: rgba(25, 25, 28, 0.97);
+            padding: 12px 18px;
+            background: rgba(28,28,30,.98);
             color: #fff;
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 12px;
-            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+            border: 1px solid rgba(255,255,255,.12);
+            border-radius: 13px;
+            box-shadow: 0 8px 30px rgba(0,0,0,.4);
             font-family:
                 -apple-system,
                 BlinkMacSystemFont,
+                "SF Pro Text",
                 "Segoe UI",
-                Roboto,
-                Arial,
                 sans-serif;
             font-size: 13px;
             font-weight: 500;
-            pointer-events: none;
-            animation: webtorToastIn 0.18s ease-out;
+            white-space: nowrap;
+            animation: webtorToastIn .18s ease-out;
         }
 
         @keyframes webtorToastIn {
@@ -144,6 +141,7 @@
                 opacity: 0;
                 transform: translate(-50%, 8px);
             }
+
             to {
                 opacity: 1;
                 transform: translate(-50%, 0);
@@ -152,10 +150,10 @@
     `);
 
     // =========================================================
-    // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+    // УДАЛИТЬ МЕНЮ
     // =========================================================
 
-    function removeMenu() {
+    function closeMenu() {
         const menu = document.getElementById('webtor-magnet-menu');
 
         if (menu) {
@@ -163,100 +161,193 @@
         }
     }
 
-    function showToast(message) {
-        const oldToast = document.getElementById('webtor-magnet-toast');
+    // =========================================================
+    // TOAST
+    // =========================================================
 
-        if (oldToast) {
-            oldToast.remove();
+    function showToast(text) {
+        const old = document.getElementById('webtor-magnet-toast');
+
+        if (old) {
+            old.remove();
         }
 
         const toast = document.createElement('div');
+
         toast.id = 'webtor-magnet-toast';
-        toast.textContent = message;
+        toast.textContent = text;
 
         document.body.appendChild(toast);
 
         setTimeout(() => {
-            toast.remove();
+            if (toast.parentNode) {
+                toast.remove();
+            }
         }, 1800);
     }
 
     // =========================================================
-    // КОПИРОВАНИЕ MAGNET-ССЫЛКИ
+    // BASE32 → HEX
+    // Нужно для magnet-ссылок с btih в base32.
     // =========================================================
 
-    async function copyMagnet(magnetHref) {
-        try {
-            // Предпочтительно используем GM_setClipboard,
-            // потому что он не зависит от clipboard permission сайта.
-            GM_setClipboard(magnetHref, 'text');
+    function base32ToHex(base32) {
+        const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
-            showToast('📋 Magnet-ссылка скопирована');
-        } catch (error) {
-            // Запасной вариант
-            try {
-                await navigator.clipboard.writeText(magnetHref);
-                showToast('📋 Magnet-ссылка скопирована');
-            } catch (clipboardError) {
-                console.error(
-                    '[Webtor] Не удалось скопировать ссылку:',
-                    clipboardError
-                );
+        let bits = '';
+        let result = '';
 
-                showToast('❌ Не удалось скопировать ссылку');
+        base32 = base32
+            .toUpperCase()
+            .replace(/[^A-Z2-7]/g, '');
+
+        for (const char of base32) {
+            const value = alphabet.indexOf(char);
+
+            if (value === -1) {
+                return null;
             }
+
+            bits += value.toString(2).padStart(5, '0');
         }
+
+        // SHA1 = 20 байт = 160 бит.
+        bits = bits.substring(0, 160);
+
+        for (let i = 0; i + 8 <= bits.length; i += 8) {
+            result += parseInt(bits.substring(i, i + 8), 2)
+                .toString(16)
+                .padStart(2, '0');
+        }
+
+        return result.length === 40 ? result : null;
     }
 
     // =========================================================
-    // ОТКРЫТИЕ WEBTOR
+    // ПОЛУЧИТЬ INFOHASH ИЗ MAGNET
     // =========================================================
 
-    function openWebtor(magnetHref) {
+    function getInfoHash(magnet) {
+        const match = magnet.match(
+            /(?:^|[?&])xt=urn:btih:([^&]+)/i
+        );
+
+        if (!match) {
+            return null;
+        }
+
+        let hash = match[1];
+
+        // Иногда значение URL-encoded.
+        try {
+            hash = decodeURIComponent(hash);
+        } catch (e) {
+            // Оставляем как есть.
+        }
+
+        // Вариант 1:
+        // обычный 40-символьный SHA1 в HEX.
+        if (/^[a-f0-9]{40}$/i.test(hash)) {
+            return hash.toLowerCase();
+        }
+
+        // Вариант 2:
+        // старый magnet с Base32 infohash.
+        if (/^[a-z2-7]{32}$/i.test(hash)) {
+            return base32ToHex(hash);
+        }
+
+        return null;
+    }
+
+    // =========================================================
+    // ОТКРЫТЬ WEBTOR
+    // =========================================================
+
+    function openWebtor(magnet) {
+        const hash = getInfoHash(magnet);
+
+        if (!hash) {
+            showToast('⚠️ Не удалось определить infohash');
+
+            // Не отправляем некорректный URL в Safari.
+            return;
+        }
+
         /*
-         * ВАЖНО:
+         * Используем только обычный HTTPS URL.
          *
-         * Раньше здесь из magnet-ссылки вырезался 40-символьный hash:
+         * НИКАКОГО:
          *
-         *     https://webtor.io/HASH
+         * https://webtor.io/magnet%3A...
          *
-         * Теперь передаём ПОЛНЫЙ magnet URI.
+         * Здесь больше нет.
          *
-         * Webtor официально умеет открывать magnet-ссылки напрямую.
-         * Это сохраняет:
-         *   - btih
-         *   - dn
-         *   - трекеры (tr)
-         *   - другие параметры magnet-ссылки
+         * Safari получает нормальный HTTPS-адрес:
          *
-         * Именно это должно устранить проблему "ресурс не найден".
+         * https://webtor.io/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
          */
 
-        const webtorUrl =
-            'https://webtor.io/' + encodeURIComponent(magnetHref);
+        const webtorUrl = 'https://webtor.io/' + hash;
 
-        // Открываем в новой вкладке.
-        const newWin = window.open(webtorUrl, '_blank');
+        /*
+         * ВАЖНО ДЛЯ iOS:
+         *
+         * window.open() может считаться popup.
+         * Поэтому вызываем его непосредственно внутри
+         * обработчика пользовательского нажатия.
+         */
 
-        // Если браузер заблокировал popup — открываем в текущей вкладке.
-        if (!newWin) {
-            window.location.href = webtorUrl;
+        const opened = window.open(webtorUrl, '_blank');
+
+        if (!opened) {
+            window.location.assign(webtorUrl);
         }
     }
 
     // =========================================================
-    // ПОКАЗ МЕНЮ
+    // СКОПИРОВАТЬ MAGNET
     // =========================================================
 
-    function showMenu(magnetHref, x, y) {
-        removeMenu();
+    function copyMagnet(magnet) {
+        try {
+            GM_setClipboard(magnet, 'text');
+            showToast('📋 Magnet-ссылка скопирована');
+            return;
+        } catch (e) {
+            console.warn('[Webtor] GM_setClipboard failed:', e);
+        }
+
+        // Запасной вариант.
+        if (navigator.clipboard) {
+            navigator.clipboard.writeText(magnet)
+                .then(() => {
+                    showToast('📋 Magnet-ссылка скопирована');
+                })
+                .catch(() => {
+                    showToast('❌ Не удалось скопировать ссылку');
+                });
+
+            return;
+        }
+
+        showToast('❌ Буфер обмена недоступен');
+    }
+
+    // =========================================================
+    // ПОКАЗАТЬ МЕНЮ
+    // =========================================================
+
+    function showMenu(magnet, x, y) {
+        closeMenu();
 
         const menu = document.createElement('div');
+
         menu.id = 'webtor-magnet-menu';
 
         menu.innerHTML = `
-            <div class="webtor-menu-title">
-                🔗 Magnet-ссылка
+            <div class="webtor-title">
+                🔗 Что сделать с magnet-ссылкой?
             </div>
 
             <button type="button" data-action="open">
@@ -266,6 +357,7 @@
                     <span class="webtor-main">
                         Открыть на Webtor.io
                     </span>
+
                     <span class="webtor-sub">
                         Открыть торрент в новой вкладке
                     </span>
@@ -277,10 +369,11 @@
 
                 <span class="webtor-text">
                     <span class="webtor-main">
-                        Скопировать magnet-ссылку
+                        Скопировать ссылку
                     </span>
+
                     <span class="webtor-sub">
-                        Скопировать ссылку в буфер обмена
+                        Сохранить оригинальный magnet в буфер
                     </span>
                 </span>
             </button>
@@ -289,26 +382,26 @@
         document.body.appendChild(menu);
 
         // =====================================================
-        // ПОЗИЦИОНИРОВАНИЕ
+        // ПОЗИЦИЯ МЕНЮ
         // =====================================================
 
-        const menuWidth = menu.offsetWidth;
-        const menuHeight = menu.offsetHeight;
+        const width = menu.offsetWidth;
+        const height = menu.offsetHeight;
 
         let left = x;
         let top = y;
 
-        // Не даём меню выйти за правый край
-        if (left + menuWidth > window.innerWidth - 10) {
-            left = window.innerWidth - menuWidth - 10;
+        // Справа
+        if (left + width > window.innerWidth - 10) {
+            left = window.innerWidth - width - 10;
         }
 
-        // Не даём меню выйти за нижний край
-        if (top + menuHeight > window.innerHeight - 10) {
-            top = window.innerHeight - menuHeight - 10;
+        // Снизу
+        if (top + height > window.innerHeight - 10) {
+            top = window.innerHeight - height - 10;
         }
 
-        // Защита от отрицательных координат
+        // Защита от выхода за экран
         left = Math.max(10, left);
         top = Math.max(10, top);
 
@@ -316,28 +409,36 @@
         menu.style.top = `${top}px`;
 
         // =====================================================
-        // КНОПКА "ОТКРЫТЬ"
+        // ОТКРЫТЬ
         // =====================================================
 
         menu.querySelector('[data-action="open"]')
-            .addEventListener('click', function () {
-                removeMenu();
-                openWebtor(magnetHref);
+            .addEventListener('click', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+
+                closeMenu();
+
+                openWebtor(magnet);
             });
 
         // =====================================================
-        // КНОПКА "КОПИРОВАТЬ"
+        // КОПИРОВАТЬ
         // =====================================================
 
         menu.querySelector('[data-action="copy"]')
-            .addEventListener('click', function () {
-                removeMenu();
-                copyMagnet(magnetHref);
+            .addEventListener('click', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+
+                closeMenu();
+
+                copyMagnet(magnet);
             });
     }
 
     // =========================================================
-    // ОБРАБОТКА КЛИКА ПО MAGNET
+    // ПЕРЕХВАТ MAGNET
     // =========================================================
 
     document.addEventListener(
@@ -350,33 +451,36 @@
             }
 
             /*
-             * Берём именно исходный href из HTML,
-             * а не link.href.
+             * Берём оригинальный href из HTML.
              *
-             * Это важно: link.href может быть преобразован браузером
-             * в абсолютный URL.
+             * Не используем link.href,
+             * потому что браузер может преобразовать значение.
              */
+
             const href = link.getAttribute('href');
 
             if (!href) {
                 return;
             }
 
-            // Учитываем возможные пробелы и регистр MAGNET:
-            const magnetHref = href.trim();
+            const magnet = href.trim();
 
-            if (!/^magnet:/i.test(magnetHref)) {
+            if (!/^magnet:/i.test(magnet)) {
                 return;
             }
 
-            // Останавливаем стандартное открытие magnet-ссылки.
+            /*
+             * Полностью блокируем стандартную обработку
+             * magnet-ссылки браузером/iOS.
+             */
+
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
 
-            // Показываем меню рядом с курсором.
+            // Показываем наше меню.
             showMenu(
-                magnetHref,
+                magnet,
                 e.clientX,
                 e.clientY
             );
@@ -385,32 +489,34 @@
     );
 
     // =========================================================
-    // ЗАКРЫТИЕ МЕНЮ ПРИ КЛИКЕ СНАРУЖУ
+    // КЛИК СНАРУЖИ → ЗАКРЫТЬ
     // =========================================================
 
     document.addEventListener(
         'click',
         function (e) {
-            const menu = document.getElementById('webtor-magnet-menu');
+            const menu = document.getElementById(
+                'webtor-magnet-menu'
+            );
 
             if (!menu) {
                 return;
             }
 
             if (!menu.contains(e.target)) {
-                removeMenu();
+                closeMenu();
             }
         },
         false
     );
 
     // =========================================================
-    // ESC — ЗАКРЫТЬ МЕНЮ
+    // ESC → ЗАКРЫТЬ
     // =========================================================
 
     document.addEventListener('keydown', function (e) {
         if (e.key === 'Escape') {
-            removeMenu();
+            closeMenu();
         }
     });
 
