@@ -1,14 +1,14 @@
-// ==UserScript==
-// @name         Magnet → Webtor.io
-// @namespace    http://tampermonkey.net/
-// @version      7.3
-// @description  Magnet menu, Webtor and clipboard
-// @grant        GM_setValue
-// @grant        GM_getValue
-// @grant        GM_setClipboard
-// @match        *://*/*
-// @run-at       document-start
-// ==/UserScript==
+ // ==UserScript==
+ // @name         Magnet → Webtor.io
+ // @namespace    http://tampermonkey.net/
+ // @version      7.4
+ // @description  Magnet menu, Webtor and clipboard
+ // @grant        GM_setValue
+ // @grant        GM_getValue
+ // @grant        GM_setClipboard
+ // @match        *://*/*
+ // @run-at       document-start
+ // ==/UserScript==
 
 (function(){
 'use strict';
@@ -23,35 +23,70 @@ function getMagnet(h){
     return /^magnet:/i.test(h)?h:null;
 }
 
-function rgb(s){
-    const m=String(s||'').match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
-    return m?[+m[1],+m[2],+m[3]]:null;
+function color(s){
+    const m=String(s||'').match(/rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?/i);
+    return m?[+m[1],+m[2],+m[3],m[4]===undefined?1:+m[4]]:null;
 }
 
-function lum(c){return c?c[0]*.299+c[1]*.587+c[2]*.114:null}
+function lum(c){
+    return c?(.299*c[0]+.587*c[1]+.114*c[2]):null;
+}
+
+function validBg(e){
+    if(!e)return null;
+    try{
+        const s=getComputedStyle(e);
+        if(s.display==='none'||s.visibility==='hidden'||+s.opacity===0)return null;
+        const c=color(s.backgroundColor);
+        if(c&&c[3]>.05)return c;
+    }catch(_){}
+    return null;
+}
 
 function theme(){
     const h=document.documentElement,b=document.body;
-    const a=(
-        h?.getAttribute('data-theme')+' '+
-        h?.getAttribute('data-color-scheme')+' '+
-        b?.getAttribute('data-theme')+' '+
-        h?.className+' '+b?.className
+
+    const attrs=[
+        h?.getAttribute('data-theme'),
+        h?.getAttribute('data-color-scheme'),
+        b?.getAttribute('data-theme'),
+        b?.getAttribute('data-color-scheme')
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    if(/^(dark|dark-mode)$/.test(attrs)||/\bdark\b/.test(attrs)&&!/\blight\b/.test(attrs))return'dark';
+    if(/^(light|light-mode)$/.test(attrs)||/\blight\b/.test(attrs)&&!/\bdark\b/.test(attrs))return'light';
+
+    const cls=(
+        String(h?.className||'')+' '+String(b?.className||'')
     ).toLowerCase();
 
-    if(/\bdark\b|dark-mode|theme[-_]dark/.test(a))return'dark';
-    if(/\blight\b|light-mode|theme[-_]light/.test(a))return'light';
+    if(/(?:^|\s)(?:theme-?dark|dark-mode|mode-dark)(?:\s|$)/.test(cls))return'dark';
+    if(/(?:^|\s)(?:theme-?light|light-mode|mode-light)(?:\s|$)/.test(cls))return'light';
 
-    const pts=[[2,2],[innerWidth/2,2],[2,innerHeight/2],[innerWidth/2,innerHeight/2]];
-    const v=[];
+    let c=validBg(b)||validBg(h);
+    if(c){
+        const l=lum(c);
+        if(l>160)return'light';
+        if(l<100)return'dark';
+    }
+
+    const pts=[
+        [innerWidth/2,innerHeight/2],
+        [innerWidth/2,20],
+        [20,innerHeight/2],
+        [innerWidth-20,innerHeight/2],
+        [innerWidth/2,innerHeight-20]
+    ];
+
+    const vals=[];
 
     for(const p of pts){
         try{
-            let e=document.elementFromPoint(...p);
-            while(e){
-                const c=rgb(getComputedStyle(e).backgroundColor);
+            let e=document.elementFromPoint(p[0],p[1]);
+            while(e&&e!==document.documentElement){
+                c=validBg(e);
                 if(c){
-                    v.push(lum(c));
+                    vals.push(lum(c));
                     break;
                 }
                 e=e.parentElement;
@@ -59,24 +94,33 @@ function theme(){
         }catch(_){}
     }
 
-    if(v.length){
-        v.sort((a,b)=>a-b);
-        return v[v.length>>1]>150?'light':'dark';
+    if(vals.length){
+        vals.sort((a,b)=>a-b);
+        const l=vals[vals.length>>1];
+        if(l>160)return'light';
+        if(l<100)return'dark';
     }
 
     try{
-        if(matchMedia('(prefers-color-scheme:dark)').matches)return'dark';
+        const s=getComputedStyle(h);
+        const fg=color(s.color);
+        if(fg){
+            const l=lum(fg);
+            if(l>190)return'dark';
+            if(l<70)return'light';
+        }
     }catch(_){}
 
-    return'light';
+    return'matchMedia' in window&&matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';
 }
 
 function styles(){
     if($('#'+ID+'style'))return;
+
     const s=document.createElement('style');
     s.id=ID+'style';
     s.textContent=`
-#${ID}overlay{position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.14);backdrop-filter:blur(2px)}
+#${ID}overlay{position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.14);backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}
 #${ID}menu{position:fixed;z-index:2147483647;width:min(360px,calc(100vw - 24px));box-sizing:border-box;padding:8px;border-radius:18px;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 14px 45px rgba(0,0,0,.25);border:1px solid transparent;animation:${ID}in .15s ease-out}
 #${ID}menu[data-theme=light],#${ID}toast[data-theme=light]{background:rgba(255,255,255,.97);color:#171717;border-color:rgba(0,0,0,.1);color-scheme:light}
 #${ID}menu[data-theme=dark],#${ID}toast[data-theme=dark]{background:rgba(32,32,36,.97);color:#fff;border-color:rgba(255,255,255,.12);color-scheme:dark}
@@ -84,11 +128,13 @@ function styles(){
 #${ID}sub{padding:0 12px 9px;font-size:12px;opacity:.6}
 .${ID}btn{width:100%;display:flex;align-items:center;gap:10px;padding:12px;border:0;border-radius:12px;background:transparent;color:inherit;font:600 14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-align:left;cursor:pointer}
 .${ID}btn:hover{background:rgba(127,127,127,.14)}
+.${ID}btn:active{transform:scale(.985)}
 .${ID}icon{width:27px;height:27px;display:grid;place-items:center;flex:none;font-size:18px}
 .${ID}txt{flex:1}
 .${ID}desc{display:block;margin-top:2px;font-size:11px;font-weight:400;opacity:.55}
-#${ID}toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);z-index:2147483647;max-width:90vw;padding:11px 16px;border-radius:12px;font:500 14px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-align:center;opacity:0;pointer-events:none;box-shadow:0 8px 30px rgba(0,0,0,.2);transition:.2s}
+#${ID}toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);z-index:2147483647;max-width:90vw;padding:11px 16px;border-radius:12px;font:500 14px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-align:center;opacity:0;pointer-events:none;box-shadow:0 8px 30px rgba(0,0,0,.2);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);transition:.2s}
 @keyframes ${ID}in{from{opacity:0;transform:scale(.96) translateY(-4px)}to{opacity:1;transform:scale(1) translateY(0)}}`;
+
     (document.head||document.documentElement).appendChild(s);
 }
 
@@ -99,13 +145,25 @@ function close(){
 
 function toast(text){
     $('#'+ID+'toast')?.remove();
+
     const t=document.createElement('div');
     t.id=ID+'toast';
     t.dataset.theme=theme();
     t.textContent=text;
+
     (document.body||document.documentElement).appendChild(t);
-    requestAnimationFrame(()=>{t.style.opacity=1;t.style.transform='translate(-50%,0)'});
-    setTimeout(()=>{t.style.opacity=0;t.style.transform='translate(-50%,20px)';setTimeout(()=>t.remove(),220)},2200);
+
+    requestAnimationFrame(()=>{
+        t.style.opacity=1;
+        t.style.transform='translate(-50%,0)';
+    });
+
+    setTimeout(()=>{
+        if(!t.isConnected)return;
+        t.style.opacity=0;
+        t.style.transform='translate(-50%,20px)';
+        setTimeout(()=>t.remove(),220);
+    },2200);
 }
 
 async function copy(text){
@@ -115,23 +173,27 @@ async function copy(text){
             return true;
         }
     }catch(_){}
+
     try{
         await navigator.clipboard.writeText(text);
         return true;
     }catch(_){}
+
     try{
         const x=document.createElement('textarea');
         x.value=text;
-        x.style.cssText='position:fixed;left:-9999px';
+        x.style.cssText='position:fixed;left:-9999px;top:0';
         document.body.appendChild(x);
         x.select();
         const ok=document.execCommand('copy');
         x.remove();
         return ok;
-    }catch(_){return false}
+    }catch(_){
+        return false;
+    }
 }
 
-function btn(icon,title,desc,fn){
+function button(icon,title,desc,fn){
     const b=document.createElement('button');
     b.type='button';
     b.className=ID+'btn';
@@ -144,7 +206,7 @@ function btn(icon,title,desc,fn){
     return b;
 }
 
-function menu(mag,a){
+function showMenu(mag,a){
     close();
     styles();
 
@@ -162,14 +224,14 @@ function menu(mag,a){
 
     m.append(t,sub);
 
-    m.appendChild(btn(
+    m.appendChild(button(
         '🌐',
         'Открыть на Webtor.io',
         'Откроется в новой вкладке',
         ()=>openWebtor(mag)
     ));
 
-    m.appendChild(btn(
+    m.appendChild(button(
         '📋',
         'Скопировать magnet-ссылку',
         'Скопировать в буфер обмена',
@@ -187,8 +249,12 @@ function menu(mag,a){
 
     (document.body||document.documentElement).append(o,m);
 
-    const r=a.getBoundingClientRect(),w=Math.min(360,innerWidth-24),h=180;
-    let x=r.left+r.width/2-w/2,y=r.bottom+8;
+    const r=a.getBoundingClientRect();
+    const w=Math.min(360,innerWidth-24);
+    const h=180;
+
+    let x=r.left+r.width/2-w/2;
+    let y=r.bottom+8;
 
     if(y+h>innerHeight-10)y=r.top-h-8;
 
@@ -198,12 +264,15 @@ function menu(mag,a){
 
 function openWebtor(mag){
     try{GM_setValue(KEY,mag)}catch(_){}
+
     let w=null;
     try{w=window.open(WT,'_blank')}catch(_){}
-    if(!w||w.closed||typeof w.closed==='undefined')location.href=WT;
+
+    if(!w||w.closed||typeof w.closed==='undefined')
+        location.href=WT;
 }
 
-function linkFromEvent(e){
+function getLink(e){
     if(e.composedPath){
         for(const x of e.composedPath()){
             if(x?.nodeType===1&&x.tagName==='A'){
@@ -215,6 +284,7 @@ function linkFromEvent(e){
 
     let x=e.target;
     if(x?.nodeType!==1)x=x?.parentElement;
+
     const a=x?.closest?.('a');
     if(!a)return null;
 
@@ -225,14 +295,14 @@ function linkFromEvent(e){
 if(!isWT){
 
     document.addEventListener('click',e=>{
-        const x=linkFromEvent(e);
+        const x=getLink(e);
         if(!x)return;
 
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation?.();
 
-        menu(x[1],x[0]);
+        showMenu(x[1],x[0]);
     },true);
 
     document.addEventListener('keydown',e=>{
@@ -258,52 +328,91 @@ if(isWT){
                 (x.name||'')
             ).toLowerCase();
 
-            if(/magnet|infohash/.test(s)&&x.offsetParent!==null)return x;
+            if(/magnet|infohash/.test(s)&&x.offsetParent!==null)
+                return x;
         }
         return null;
     }
 
-    function setVal(x,v){
-        const d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(x),'value');
+    function setValue(x,v){
+        const d=Object.getOwnPropertyDescriptor(
+            Object.getPrototypeOf(x),'value'
+        );
         d?.set?d.set.call(x,v):x.value=v;
     }
 
     function inject(){
         if(done)return true;
 
-        const mag=pending(),x=findInput();
+        const mag=pending();
+        const x=findInput();
+
         if(!mag||!x)return false;
 
-        setVal(x,mag);
+        setValue(x,mag);
+
         x.dispatchEvent(new Event('input',{bubbles:true}));
         x.dispatchEvent(new Event('change',{bubbles:true}));
 
         const form=x.closest('form');
-        const bs=form?.querySelectorAll('button,input[type=submit]')||[];
+        const bs=form?.querySelectorAll(
+            'button,input[type=submit]'
+        )||[];
+
         let b=null;
 
         for(const z of bs){
-            const s=(z.textContent||z.value||z.getAttribute('aria-label')||'').toLowerCase();
-            if(/найти|search|find|go|открыть/.test(s)){b=z;break}
+            const s=(
+                z.textContent||
+                z.value||
+                z.getAttribute('aria-label')||
+                ''
+            ).toLowerCase();
+
+            if(/найти|search|find|go|открыть/.test(s)){
+                b=z;
+                break;
+            }
         }
 
         if(!b&&bs.length===1)b=bs[0];
 
-        if(b)setTimeout(()=>b.click(),100);
-        else if(form?.requestSubmit)setTimeout(()=>{try{form.requestSubmit()}catch(_){}},100);
-        else setTimeout(()=>x.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true})),100);
+        if(b)
+            setTimeout(()=>b.click(),100);
+        else if(form?.requestSubmit)
+            setTimeout(()=>{
+                try{form.requestSubmit()}catch(_){}
+            },100);
+        else
+            setTimeout(()=>x.dispatchEvent(
+                new KeyboardEvent('keydown',{
+                    key:'Enter',
+                    code:'Enter',
+                    keyCode:13,
+                    which:13,
+                    bubbles:true
+                })
+            ),100);
 
         done=true;
+
         try{GM_setValue(KEY,'')}catch(_){}
+
         return true;
     }
 
     let n=0;
+
     const timer=setInterval(()=>{
-        if(inject()||++n>=100)clearInterval(timer);
+        if(inject()||++n>=100)
+            clearInterval(timer);
     },250);
 
-    addEventListener('load',()=>setTimeout(inject,300),true);
+    addEventListener(
+        'load',
+        ()=>setTimeout(inject,300),
+        true
+    );
 }
 
 styles();
