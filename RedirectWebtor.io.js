@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Magnet → Webtor.io
 // @namespace    http://tampermonkey.net/
-// @version      10.1
-// @description  Magnet → Webtor + copy (Fixed theme detection & layout)
+// @version      10.2
+// @description  Magnet → Webtor + copy (Fixed theme detection & React injection)
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_setClipboard
@@ -95,11 +95,9 @@ function rgb(v){
 
 function lum(c){ return c[0]*.299 + c[1]*.587 + c[2]*.114; }
 
-// Улучшенная функция определения темы
 function theme(targetEl){
     const h=document.documentElement, b=document.body;
 
-    // 1. Явные атрибуты данных (наивысший приоритет)
     for(const e of [h,b].filter(Boolean)){
         for(const a of ['data-theme','data-bs-theme','data-color-scheme','data-color-mode','data-mode','data-theme-mode','data-scheme']){
             const val=e.getAttribute(a);
@@ -111,7 +109,6 @@ function theme(targetEl){
         }
     }
 
-    // 2. Классы (строгая проверка, чтобы избежать ложных срабатываний на кнопках переключения)
     for(const e of [h,b].filter(Boolean)){
         if(!e.className) continue;
         const cls=e.className.toLowerCase();
@@ -121,14 +118,12 @@ function theme(targetEl){
         if(hasLight && !hasDark) return 'light';
     }
 
-    // 3. CSS свойство color-scheme
     try{
         const cs=getComputedStyle(h).colorScheme.toLowerCase();
         if(cs.includes('dark')) return 'dark';
         if(cs.includes('light')) return 'light';
     }catch(_){}
 
-    // 4. Проверка фона: расширяем поиск на целевой элемент и его предков
     const elementsToCheck=[h,b];
     if(targetEl){
         let curr=targetEl;
@@ -143,8 +138,6 @@ function theme(targetEl){
     for(const e of elementsToCheck){
         try{
             const style=getComputedStyle(e);
-            
-            // Проверяем CSS-переменные
             for(const v of vars){
                 const val=style.getPropertyValue(v).trim();
                 if(val){
@@ -152,8 +145,6 @@ function theme(targetEl){
                     if(c && c[3]>0.5) return lum(c)<128?'dark':'light';
                 }
             }
-            
-            // Проверяем реальный background-color
             const bgColor=style.backgroundColor;
             if(bgColor && bgColor!=='rgba(0, 0, 0, 0)' && bgColor!=='transparent'){
                 const c=rgb(bgColor);
@@ -166,7 +157,6 @@ function theme(targetEl){
         }catch(_){}
     }
 
-    // 5. Фоллбэк на системные настройки
     return matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
 }
 
@@ -241,7 +231,7 @@ function menu(mag,a){
     close();
     const m=document.createElement('div');
     m.id=ID+'menu';
-    m.dataset.theme=theme(a); // Передаем целевой элемент для точного определения фона
+    m.dataset.theme=theme(a);
 
     const t=document.createElement('div');
     t.id=ID+'title';
@@ -264,7 +254,6 @@ function menu(mag,a){
 
     document.body.append(o,m);
 
-    // Динамический расчет высоты для предотвращения обрезки снизу
     const rect=m.getBoundingClientRect();
     const h=rect.height;
     const w=rect.width;
@@ -369,55 +358,88 @@ if(!webtor){
 }
 
 if(webtor){
-    let done=false;
-
-    function input(){
-        for(const x of document.querySelectorAll('input,textarea')){
-            const s=((x.placeholder||'')+' '+(x.getAttribute('aria-label')||'')+' '+(x.name||'')).toLowerCase();
-            if(/magnet|infohash/.test(s) && x.offsetParent!==null) return x;
+    function getInput(){
+        // 1. Ищем по ключевым словам в атрибутах
+        const inputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea');
+        for(const x of inputs){
+            if(x.offsetParent !== null && !x.disabled && !x.readOnly){
+                const s = ((x.placeholder||'') + ' ' + (x.getAttribute('aria-label')||'') + ' ' + (x.name||'') + ' ' + (x.id||'')).toLowerCase();
+                if(/magnet|infohash|torrent|url|link|search|встав|paste/.test(s)) return x;
+            }
         }
+        // 2. Фоллбэк: первое видимое текстовое поле (если страница простая)
+        for(const x of inputs){
+            if(x.offsetParent !== null && !x.disabled && !x.readOnly) return x;
+        }
+        return null;
     }
 
     function inject(){
-        if(done) return true;
+        const mag = (() => { try { return GM_getValue(KEY, ''); } catch(_) { return ''; } })();
+        if (!mag) return false; // Нет ссылки в хранилище, останавливаем попытки
 
-        const mag=(()=>{try{return GM_getValue(KEY,'')}catch(_){return''}})();
-        const x=input();
+        const x = getInput();
+        if (!x) return false; // Поле ввода еще не отрисовано, ждем следующей итерации
 
-        if(!mag||!x) return false;
-
-        const d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(x),'value');
-        d?.set ? d.set.call(x,mag) : x.value=mag;
-
-        x.dispatchEvent(new Event('input',{bubbles:true}));
-        x.dispatchEvent(new Event('change',{bubbles:true}));
-
-        const form=x.closest('form');
-        const bs=form?.querySelectorAll('button,input[type=submit]')||[];
-        let b=null;
-
-        for(const z of bs){
-            const s=(z.textContent||z.value||z.getAttribute('aria-label')||'').toLowerCase();
-            if(/найти|search|find|go|открыть/.test(s)){b=z;break}
+        // 1. Надежный способ установки значения для React/Vue (обход контроля состояния)
+        const tracker = x._valueTracker;
+        if (tracker) tracker.setValue(mag);
+        
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+        if (nativeInputValueSetter) {
+            nativeInputValueSetter.call(x, mag);
+        } else {
+            x.value = mag;
         }
 
-        if(!b&&bs.length===1) b=bs[0];
+        // 2. Генерация событий для активации фреймворков
+        x.dispatchEvent(new Event('focus', { bubbles: true }));
+        x.dispatchEvent(new Event('input', { bubbles: true }));
+        x.dispatchEvent(new Event('change', { bubbles: true }));
 
-        if(b) setTimeout(()=>b.click(),100);
-        else if(form?.requestSubmit) setTimeout(()=>{try{form.requestSubmit()}catch(_){}},100);
-        else setTimeout(()=>x.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true})),100);
+        // 3. Поиск кнопки отправки
+        const form = x.closest('form');
+        const bs = form?.querySelectorAll('button, input[type=submit], div[role="button"]') || [];
+        let b = null;
 
-        done=true;
-        try{GM_setValue(KEY,'')}catch(_){}
-        return true;
+        for(const z of bs){
+            const s = (z.textContent || z.value || z.getAttribute('aria-label') || '').toLowerCase();
+            if(/найти|search|find|go|открыть|start|download|скачать/.test(s)){
+                b = z;
+                break;
+            }
+        }
+
+        if(!b && bs.length === 1) b = bs[0];
+
+        // 4. Задержка перед кликом для гарантии обработки событий фреймворком (увеличена до 300мс)
+        setTimeout(() => {
+            if(b) {
+                b.click();
+            } else if(form?.requestSubmit) {
+                try { form.requestSubmit(); } catch(_) {}
+            } else {
+                x.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+            }
+        }, 300);
+
+        // 5. Очистка хранилища, чтобы не повторять действие
+        try { GM_setValue(KEY, ''); } catch(_) {}
+        
+        return true; // Успех, останавливаем таймер
     }
 
-    let n=0;
-    const timer=setInterval(()=>{
-        if(inject()||++n>=100) clearInterval(timer);
-    },250);
+    let n = 0;
+    const timer = setInterval(() => {
+        if(inject() || ++n >= 100) { // 100 попыток * 250мс = 25 секунд макс.
+            clearInterval(timer);
+        }
+    }, 250);
 
-    addEventListener('load',()=>setTimeout(inject,300),true);
+    // Дополнительный триггер при полной загрузке страницы
+    addEventListener('load', () => {
+        setTimeout(inject, 500);
+    }, true);
 }
 
 styles();
