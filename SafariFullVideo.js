@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         iOS Safari — Native Player
 // @namespace    ios-native-player-button
-// @version      9.14.0
+// @version      9.14.1
 // @description  Native iOS fullscreen + Skip + Ускорение при удержании + Настройки
 // @match        *://*/*
 // @run-at       document-start
-// @grant        none
+// @grant        GM_addStyle
 // ==/UserScript==
 
 (() => {
@@ -41,7 +41,6 @@
     };
 
     // Минимальный размер видео, для которого создаются кнопки
-    // (защищает от служебных/скрытых/крошечных video-элементов)
     const MIN_VIDEO_W = 140;
     const MIN_VIDEO_H = 100;
 
@@ -83,7 +82,7 @@
     const observedShadows = new WeakSet();
     const shadowProcessors = [];
     let settingsPanel = null;
-    let layer = null;
+    let styleElement = null; // Изменено для поддержки GM_addStyle
 
     // ============================================================
     // Иконки
@@ -101,23 +100,19 @@
     };
 
     // ============================================================
-    // CSS (минифицированный, генерируется из CONFIG)
+    // CSS (Обновленная функция applyStyle для обхода CSP в iframe)
     // ============================================================
-
-    const style = document.createElement('style');
 
     const buildCSS = () => {
         const C = CONFIG.BUTTON_CLASS;
         const R = CONFIG.BUTTON_RADIUS;
         const OP = CONFIG.BUTTON_OPACITY / 100;
         const BG = CONFIG.BUTTON_BG_ALPHA / 100;
-        // Радиус в пикселях: та же кривизна угла, что и у кнопок
         const RPX = Math.round(CONFIG.BUTTON_SIZE * R / 100);
         return '.' + C + '{position:absolute!important;width:' + CONFIG.BUTTON_SIZE + 'px!important;height:' + CONFIG.BUTTON_SIZE + 'px!important;padding:0!important;margin:0!important;box-sizing:border-box!important;display:flex!important;align-items:center!important;justify-content:center!important;border:1px solid rgba(255,255,255,.32)!important;border-radius:' + R + '%!important;background:rgba(20,20,22,' + BG + ')!important;color:#fff!important;opacity:' + OP + '!important;z-index:2147483647!important;backdrop-filter:blur(7px)!important;-webkit-backdrop-filter:blur(7px)!important;-webkit-appearance:none!important;appearance:none!important;outline:none!important;box-shadow:0 2px 10px rgba(0,0,0,.35)!important;touch-action:manipulation!important;-webkit-tap-highlight-color:transparent!important;cursor:pointer!important;pointer-events:auto!important}'
         + '.' + C + ':active{transform:scale(.9)!important;filter:brightness(1.3)!important}'
         + '.' + C + ' svg{width:19px!important;height:19px!important;display:block!important;pointer-events:none!important}'
         + '.' + C + '-layer{position:absolute!important;top:0!important;left:0!important;width:0!important;height:0!important;z-index:2147483647!important;pointer-events:none!important}'
-        // Бейдж скорости: высота как у кнопки, радиус в px (не даёт эллипсов на широкой пилюле)
         + '.' + C + '-speed{position:absolute!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;gap:6px!important;white-space:nowrap!important;line-height:1!important;height:' + CONFIG.BUTTON_SIZE + 'px!important;box-sizing:border-box!important;border:1px solid rgba(255,255,255,.32)!important;background:rgba(20,20,22,' + BG + ')!important;color:#fff!important;opacity:' + OP + '!important;border-radius:' + RPX + 'px!important;z-index:2147483647!important;font-family:-apple-system,BlinkMacSystemFont,sans-serif!important;pointer-events:none!important;transform:translateX(-50%)!important;padding:0 14px!important;font-size:16px!important;font-weight:600!important;backdrop-filter:blur(7px)!important;-webkit-backdrop-filter:blur(7px)!important;box-shadow:0 2px 10px rgba(0,0,0,.35)!important;animation:npFadeSpeed 1.5s ease-in-out!important}'
         + '.' + C + '-speed svg{width:18px!important;height:18px!important;flex-shrink:0!important;display:block!important}'
         + '.' + C + '-notification,.' + C + '-error{position:fixed!important;top:50%!important;left:50%!important;transform:translate(-50%,-50%)!important;background:rgba(0,0,0,.85)!important;color:#fff!important;z-index:2147483647!important;font-family:-apple-system,BlinkMacSystemFont,sans-serif!important;pointer-events:none!important;padding:12px 24px!important;border-radius:8px!important;font-size:14px!important}'
@@ -154,8 +149,22 @@
     };
 
     const applyStyle = () => {
-        style.textContent = buildCSS();
-        if (!style.isConnected) (document.head || document.documentElement).appendChild(style);
+        const css = buildCSS();
+        try {
+            if (!styleElement) {
+                if (typeof GM_addStyle !== 'undefined') {
+                    styleElement = GM_addStyle(css);
+                } else {
+                    styleElement = document.createElement('style');
+                    styleElement.textContent = css;
+                    (document.head || document.documentElement).appendChild(styleElement);
+                }
+            } else {
+                styleElement.textContent = css;
+            }
+        } catch (e) {
+            console.error('[iOS Native Player] Style injection error:', e);
+        }
     };
 
     // ============================================================
@@ -163,7 +172,9 @@
     // ============================================================
 
     const getLayer = () => {
+        let layer = document.querySelector('.' + CONFIG.BUTTON_CLASS + '-layer');
         if (layer && layer.isConnected) return layer;
+        
         layer = document.createElement('div');
         layer.className = CONFIG.BUTTON_CLASS + '-layer';
         (document.body || document.documentElement).appendChild(layer);
@@ -176,7 +187,6 @@
 
     const isLiveVideo = (video) => video instanceof HTMLVideoElement && video.isConnected;
 
-    // Видео достаточно большое и не скрыто стилями
     const isMeaningfulVideo = (video) => {
         const r = video.getBoundingClientRect();
         if (r.width < MIN_VIDEO_W || r.height < MIN_VIDEO_H) return false;
@@ -497,7 +507,6 @@
             return;
         }
 
-        // Скрываем кнопки для служебных/скрытых/мелких видео
         if (!isMeaningfulVideo(video)) {
             buttons.forEach((btn) => { btn.style.display = 'none'; });
             return;
@@ -527,9 +536,6 @@
 
     const attachVideo = (video) => {
         if (!(video instanceof HTMLVideoElement) || !video.isConnected || videoButtons.has(video)) return;
-
-        // Не создаём кнопки для служебных/скрытых/мелких video
-        // (повторная попытка произойдёт при периодическом сканировании)
         if (!isMeaningfulVideo(video)) return;
 
         const buttons = [];
@@ -833,7 +839,6 @@
             tick++;
             if (tick % scanEvery === 0) {
                 scanVideos();
-                // Повторно проверяем Shadow-корни: видео могло стать видимым
                 for (const process of shadowProcessors) {
                     try { process(); } catch (e) {}
                 }
@@ -873,7 +878,7 @@
         scanVideos();
         scanShadows();
         startPeriodicTasks();
-        console.log('[iOS Native Player] v9.14 loaded OK');
+        console.log('[iOS Native Player] v9.14.1 loaded OK (with GM_addStyle support)');
     } catch (e) {
         console.error('[iOS Native Player] start error:', e);
     }
