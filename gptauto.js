@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      78.0
-// @description  Авторегистрация ChatGPT через AgentMail.to / SimpleLogin + диагностика
+// @version      79.0
+// @description  Авторегистрация ChatGPT через AgentMail.to / SimpleLogin + диагностика + авто-запуск verify
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://auth.openai.com/*
@@ -86,7 +86,7 @@ async function buildReport() {
     const p = [];
     p.push('═══ CHATGPT AUTO REGISTER — ОТЧЁТ ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия скрипта: 78.0');
+    p.push('Версия скрипта: 79.0');
     p.push('URL: ' + location.href);
     p.push('Host: ' + location.hostname);
     p.push('Path: ' + location.pathname);
@@ -303,7 +303,7 @@ function req(opts) {
     return new Promise(res => GM_xmlhttpRequest({
         ...opts,
         onload: r => {
-            log('DEBUG', 'http', '← ' + r.status + ' ' + short + (r.status >= 400 ? ' BODY=' + (r.responseText || '').slice(0, 200) : ''));
+            log('DEBUG', 'http', '← ' + r.status + ' ' + short + (r.status >= 400 ? ' BODY=' + (r.responseText || '').slice(0, 300) : ''));
             verifyStats.lastApiStatus = r.status;
             res(r);
         },
@@ -634,7 +634,6 @@ function findEmail() {
 const findPwd = () => [...document.querySelectorAll('input[type="password"]')].find(el => el.offsetParent !== null) || null;
 
 function findCodeInp() {
-    // Расширенный поиск: учитываем форму _r_5_-code и name="code"
     for (const s of ['input[id*="-code"]', 'input[name="code"]',
                      'input[placeholder*="код" i]', 'input[placeholder*="code" i]',
                      'input[inputmode="numeric"]', 'input[autocomplete="one-time-code"]']) {
@@ -834,8 +833,6 @@ function posMenu() {
     if (!menuBtn) return;
     const isMob = innerWidth < 768;
     const host = location.hostname;
-    // auth.openai.com — нет сайдбара, ставим в левый угол
-    // chatgpt.com — справа от логотипа в сайдбаре
     const left = host.includes('auth.openai.com') ? (isMob ? 8 : 12) : (isMob ? 52 : 56);
     if (menuBtn.style.left === left + 'px') return;
     menuBtn.style.left = left + 'px';
@@ -1005,7 +1002,27 @@ async function stageLogin() {
             email = alias;
             notify(`Алиас: ${alias} → ${inbox.email}`, 'info', 6000);
         } else {
-            const ib = await createInbox();
+            // ⚡ Обработка лимита ящиков
+            let ib = await createInbox();
+            if (!ib) {
+                const list = await listInboxes();
+                log('WARN', 'stageLogin', 'inbox create failed, existing: ' + list.length);
+                if (list.length >= 3) {
+                    notify('AgentMail: лимит ящиков. Удаляю старые…', 'warn', 5000);
+                    const sorted = list.sort((a, b) => {
+                        const ta = new Date(a.created_at || a.createdAt || 0).getTime();
+                        const tb = new Date(b.created_at || b.createdAt || 0).getTime();
+                        return ta - tb;
+                    });
+                    const toDelete = sorted.slice(0, 2);
+                    for (const old of toDelete) {
+                        const id = old.inbox_id || old.email;
+                        log('INFO', 'stageLogin', 'deleting old inbox: ' + id);
+                        await delInbox(id);
+                    }
+                    ib = await createInbox();
+                }
+            }
             if (!ib) return setStatus('');
             inbox = ib; email = ib.email;
             notify(`Почта: ${email}`, 'info', 6000);
@@ -1293,7 +1310,7 @@ async function init() {
             await save('complete', null);
             regDone = false;
             notifyDone = false;
-            log('INFO', 'init', 'regDone reset (mismatch or pending)');
+            log('INFO', 'init', 'regDone reset');
         }
 
         if (prevAcc && currAcc && prevAcc !== currAcc) {
@@ -1312,13 +1329,28 @@ async function init() {
         createMenu();
         log('INFO', 'init', 'menu created at left=' + menuBtn.style.left);
 
+        // ⚡ АВТО-ЗАПУСК: verify/pwd/profile без клика
+        setTimeout(async () => {
+            const stage = detect();
+            log('INFO', 'init', 'auto-check stage=' + stage + ' running=' + running + ' regDone=' + regDone + ' codeReqAt=' + (codeReqAt ? 'yes' : 'no'));
+            if (stage === 'verify' && !regDone && !running && codeReqAt) {
+                log('INFO', 'init', 'auto-runStage verify');
+                await runStage();
+            } else if (stage === 'pwd' && !regDone && !running) {
+                log('INFO', 'init', 'auto-runStage pwd');
+                await runStage();
+            } else if (stage === 'profile' && !regDone && !running) {
+                log('INFO', 'init', 'auto-runStage profile');
+                await runStage();
+            }
+        }, 800);
+
         let lastUrl = location.href;
         setInterval(() => {
             if (location.href !== lastUrl) {
                 log('INFO', 'url', lastUrl + ' → ' + location.href);
                 lastUrl = location.href;
                 if (menuVis) updateMenu();
-                // ⚡ Автозапуск при смене URL, если регистрация уже идёт
                 if (!regDone && !running && (codeReqAt || inbox)) {
                     log('INFO', 'url', 'auto-runStage on URL change');
                     setTimeout(() => runStage(), 500);
