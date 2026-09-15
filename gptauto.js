@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      74.0
-// @description  Авторегистрация ChatGPT через AgentMail.to / SimpleLogin + диагностика
+// @version      75.0
+// @description  Авторегистрация ChatGPT через AgentMail.to / SimpleLogin + расширенная диагностика
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://auth.openai.com/*
@@ -35,6 +35,16 @@ let codeDone = false, profileDone = false, regDone = false,
     codeReqAt = null, usedIds = new Set(), urlTimer = null,
     helpModal = null, settingsModal = null, ctx = null,
     notifyDone = false, canContinue = false;
+
+// Статистика проверки почты
+const verifyStats = {
+    attempts: 0, lastReason: null, lastMsgCount: 0,
+    lastCode: null, lastCodeAge: null,
+    fillAttempts: 0, fillSuccess: 0,
+    lastApiStatus: null, lastApiError: null,
+    inboxId: null, inboxEmail: null,
+    firstMsgTime: null, codeReqTime: null,
+};
 
 // ═══════════════════ ДИАГНОСТИКА ═══════════════════
 const LOG_MAX = 500;
@@ -79,7 +89,7 @@ async function buildReport() {
     const p = [];
     p.push('═══ CHATGPT AUTO REGISTER — ОТЧЁТ ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия скрипта: 74.0');
+    p.push('Версия скрипта: 75.0');
     p.push('URL: ' + location.href);
     p.push('User Agent: ' + navigator.userAgent);
     p.push('Платформа: ' + navigator.platform + ' | Mobile: ' + (innerWidth < 768));
@@ -100,11 +110,29 @@ async function buildReport() {
     p.push('codeReqAt: ' + (codeReqAt ? new Date(codeReqAt).toISOString() : null));
     p.push('usedIds: ' + usedIds.size);
     p.push('');
+    p.push('─── ПРОВЕРКА ПОЧТЫ ───');
+    p.push('inboxId: ' + verifyStats.inboxId);
+    p.push('inboxEmail: ' + verifyStats.inboxEmail);
+    p.push('attempts: ' + verifyStats.attempts);
+    p.push('lastReason: ' + verifyStats.lastReason);
+    p.push('lastMsgCount: ' + verifyStats.lastMsgCount);
+    p.push('lastCode: ' + verifyStats.lastCode);
+    p.push('lastCodeAge: ' + verifyStats.lastCodeAge);
+    p.push('fillAttempts: ' + verifyStats.fillAttempts);
+    p.push('fillSuccess: ' + verifyStats.fillSuccess);
+    p.push('lastApiStatus: ' + verifyStats.lastApiStatus);
+    p.push('lastApiError: ' + verifyStats.lastApiError);
+    p.push('codeReqTime: ' + (verifyStats.codeReqTime ? new Date(verifyStats.codeReqTime).toISOString() : null));
+    p.push('firstMsgTime: ' + (verifyStats.firstMsgTime ? new Date(verifyStats.firstMsgTime).toISOString() : null));
+    p.push('');
     p.push('─── КОНФИГ ───');
     p.push('mode: ' + C.mode);
     p.push('debug: ' + C.debug);
     p.push('fast: ' + C.fast);
     p.push('shift: ' + C.shift);
+    p.push('interval: ' + C.interval);
+    p.push('maxTries: ' + C.maxTries);
+    p.push('tolMs: ' + C.tolMs);
     p.push('amKey: ' + (C.amKey ? C.amKey.slice(0, 8) + '…(' + C.amKey.length + ')' : 'нет'));
     p.push('slKey: ' + (C.slKey ? C.slKey.slice(0, 8) + '…(' + C.slKey.length + ')' : 'нет'));
     p.push('');
@@ -112,6 +140,8 @@ async function buildReport() {
     p.push('findEmail(): ' + (findEmail() ? 'есть' : 'нет'));
     p.push('findPwd(): ' + (findPwd() ? 'есть' : 'нет'));
     p.push('findCodeInp(): ' + (findCodeInp() ? 'есть' : 'нет'));
+    const codes = findCodes();
+    p.push('findCodes(): ' + (codes ? (codes.type === 'otp' ? 'OTP (' + codes.inputs.length + ' полей)' : 'single') : 'нет'));
     const prof = findProfile();
     p.push('findProfile().name: ' + (prof.name ? 'есть' : 'нет'));
     p.push('findProfile().age: ' + (prof.age ? 'есть' : 'нет'));
@@ -126,7 +156,7 @@ async function buildReport() {
     else diagErrors.slice(-20).forEach(e => p.push(e));
     p.push('');
     p.push('─── ЛОГ (' + logBuf.length + ') ───');
-    if (!logBuf.length) p.push('(пусто — включите диагностику в меню)');
+    if (!logBuf.length) p.push('(пусто — включите диагностику)');
     else logBuf.slice(-200).forEach(l => p.push(l));
     p.push('');
     p.push('═══ КОНЕЦ ОТЧЁТА ═══');
@@ -155,7 +185,7 @@ function showReportModal(report, copied) {
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
 <h2 style="margin:0;font-size:17px;font-weight:600">Отчёт диагностики</h2>
 <button id="grmc" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--gmut);padding:0 5px">×</button></div>
-<p style="margin:0 0 10px 0;font-size:12px;color:var(--gmut)">${copied ? '✓ Скопировано в буфер. Вставьте в чат.' : '⚠ Буфер недоступен. Выделите текст вручную.'}</p>
+<p style="margin:0 0 10px 0;font-size:12px;color:var(--gmut)">${copied ? '✓ Скопировано в буфер.' : '⚠ Буфер недоступен. Выделите текст вручную.'}</p>
 <textarea id="grmt" readonly style="flex:1;min-height:400px;width:100%;padding:12px;border-radius:10px;border:1px solid var(--gbd);background:var(--gelev);color:var(--gfg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.4;resize:vertical;box-sizing:border-box">${report.replace(/</g, '&lt;')}</textarea>
 <div style="display:flex;gap:10px;margin-top:12px">
 <button id="grmc2" style="flex:1;padding:12px;background:var(--gacc);color:var(--gaccf);border:none;border-radius:999px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit">Скопировать снова</button>
@@ -238,7 +268,7 @@ function fireInput(el, v) {
     catch { el.dispatchEvent(new Event('input', { bubbles: true })); }
 }
 async function click(el) {
-    if (!el) { log('DEBUG', 'click', 'null element'); return false; }
+    if (!el) { log('DEBUG', 'click', 'null'); return false; }
     log('DEBUG', 'click', (el.tagName || '?') + ' "' + (el.textContent || '').trim().slice(0, 30) + '"');
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     await delay(50, 150);
@@ -271,13 +301,25 @@ const load = k => GM.getValue('cg_' + k, null).catch(() => null);
 
 // ═══════════════════ HTTP ═══════════════════
 function req(opts) {
-    const short = (opts.url || '').replace(/^https?:\/\/[^/]+/, '').slice(0, 60);
+    const short = (opts.url || '').replace(/^https?:\/\/[^/]+/, '').slice(0, 80);
     log('DEBUG', 'http', (opts.method || 'GET') + ' ' + short);
     return new Promise(res => GM_xmlhttpRequest({
         ...opts,
-        onload: r => { log('DEBUG', 'http', '← ' + r.status + ' ' + short); res(r); },
-        onerror: e => { log('ERROR', 'http', 'net error: ' + short); res({ status: 0, responseText: '', error: e }); },
-        ontimeout: () => { log('ERROR', 'http', 'timeout: ' + short); res({ status: 0, responseText: 'timeout' }); },
+        onload: r => {
+            log('DEBUG', 'http', '← ' + r.status + ' ' + short + (r.status >= 400 ? ' BODY=' + (r.responseText || '').slice(0, 200) : ''));
+            verifyStats.lastApiStatus = r.status;
+            res(r);
+        },
+        onerror: e => {
+            log('ERROR', 'http', 'net error: ' + short);
+            verifyStats.lastApiError = 'net error';
+            res({ status: 0, responseText: '', error: e });
+        },
+        ontimeout: () => {
+            log('ERROR', 'http', 'timeout: ' + short);
+            verifyStats.lastApiError = 'timeout';
+            res({ status: 0, responseText: 'timeout' });
+        },
     }));
 }
 async function reqRetry(opts, label = 'API') {
@@ -326,7 +368,7 @@ function openSettings() {
         settingsModal.style.cssText = 'position:fixed;inset:0;background:var(--govl);z-index:999999;display:flex;align-items:center;justify-content:center;animation:gFd .2s var(--gease) both';
         const d = document.createElement('div');
         d.className = 'gpt-gl';
-        d.style.cssText = 'padding:24px;border-radius:20px;max-width:480px;width:90%;color:var(--gfg);animation:gIn .3s var(--gease) both';
+        d.style.cssText = 'padding:24px;border-radius:20px;max-width:480px;width:90%;max-height:90vh;overflow-y:auto;color:var(--gfg);animation:gIn .3s var(--gease) both';
         d.innerHTML = `
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
 <h2 style="margin:0;font-size:18px;font-weight:600">Настройки</h2>
@@ -346,6 +388,15 @@ function openSettings() {
 <input id="slin" class="gpt-in" type="password" placeholder="sl_..." autocomplete="off">
 <p class="gpt-hint">app.simplelogin.io/dashboard/api_key<br>
 <span style="opacity:.8">SimpleLogin создаёт алиас → AgentMail. Постоянный inbox привяжите как mailbox вручную.</span></p></div>
+<div style="height:16px"></div>
+<div style="border-top:1px solid var(--gbd);padding-top:16px">
+<label class="gpt-lbl">Диагностика</label>
+<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:var(--gelev);border-radius:12px;margin-bottom:10px">
+<span style="font-size:13px;color:var(--gfg)">Подробный лог</span>
+<span id="gsw" style="position:relative;width:38px;height:22px;background:${C.debug ? 'var(--gfg)' : '#8e8e8e'};border-radius:999px;flex-shrink:0;cursor:pointer;transition:background .2s var(--gease)">
+<span style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s var(--gease);box-shadow:0 1px 3px rgba(0,0,0,.3);transform:translateX(${C.debug ? '16px' : '0'})"></span></span></div>
+<button id="grepBtn" style="width:100%;padding:12px;background:var(--gelev);color:var(--gfg);border:1px solid var(--gbd);border-radius:999px;font-size:13px;cursor:pointer;font-family:inherit">Скопировать отчёт</button>
+</div>
 <div style="height:20px"></div>
 <div style="display:flex;flex-direction:column;gap:10px">
 <button id="gsave" class="gpt-btn">Сохранить</button>
@@ -396,6 +447,24 @@ function openSettings() {
             am.value = ''; sl.value = ''; mode = 'agentmail'; upd();
             notify('Ключи удалены', 'ok', 3000);
         };
+
+        // Диагностика
+        const sw = d.querySelector('#gsw');
+        sw.onclick = async () => {
+            C.debug = !C.debug;
+            await save('debug', C.debug);
+            const dot = sw.firstElementChild;
+            sw.style.background = C.debug ? 'var(--gfg)' : '#8e8e8e';
+            dot.style.transform = 'translateX(' + (C.debug ? '16px' : '0') + ')';
+            log('INFO', 'debug', 'diagnostics ' + (C.debug ? 'ENABLED' : 'disabled'));
+            notify('Диагностика ' + (C.debug ? 'включена' : 'выключена'), 'info', 2500);
+        };
+        d.querySelector('#grepBtn').onclick = () => {
+            settingsModal.remove();
+            settingsModal = null;
+            copyReport();
+        };
+
         setTimeout(() => am.focus(), 100);
     });
 }
@@ -430,8 +499,14 @@ async function createInbox() {
         notify(`AgentMail: ${r.status} ${(r.responseText || '').slice(0, 150)}`, 'err', 12000);
         return null;
     }
-    try { const d = JSON.parse(r.responseText); return { id: d.inbox_id, email: d.inbox_id || d.email, username }; }
-    catch { return null; }
+    try {
+        const d = JSON.parse(r.responseText);
+        const inboxObj = { id: d.inbox_id, email: d.inbox_id || d.email, username };
+        verifyStats.inboxId = inboxObj.id;
+        verifyStats.inboxEmail = inboxObj.email;
+        log('INFO', 'inbox', 'created: ' + JSON.stringify(inboxObj));
+        return inboxObj;
+    } catch { return null; }
 }
 async function delInbox(id) {
     if (!id) return false;
@@ -485,26 +560,49 @@ function extractCode(data) {
         .filter(Boolean).join('\n').replace(/<[^>]*>/g, ' ').replace(/&nbsp;|&#160;/g, ' ');
     const glued = raw.replace(/(\d)[\s\u00a0]+(?=\d)/g, '$1');
     const m = glued.match(/(?:код|code|verification)[^\d\n]{0,40}(\d{6})/i) || glued.match(/\b(\d{6})\b/);
-    return m ? m[1] : null;
+    if (!m) {
+        log('DEBUG', 'extractCode', 'no match. raw=' + raw.slice(0, 200).replace(/\s+/g, ' '));
+        return null;
+    }
+    return m[1];
 }
 const msgTime = m => new Date(m.timestamp || m.created_at || 0).getTime();
 const isFresh = m => !codeReqAt || msgTime(m) >= codeReqAt - C.tolMs;
 
 async function findCode() {
-    if (!inbox?.id) return { found: false, reason: 'no_inbox' };
+    if (!inbox?.id) { log('WARN', 'findCode', 'no inbox.id'); return { found: false, reason: 'no_inbox' }; }
     const msgs = await listMsgs(inbox.id);
-    if (msgs?.__rate) return { found: false, reason: 'rate_limited' };
-    if (!msgs) return { found: false, reason: 'api_error' };
-    if (!msgs.length) return { found: false, reason: 'no_messages' };
+    if (msgs?.__rate) { log('WARN', 'findCode', 'rate limited'); return { found: false, reason: 'rate_limited' }; }
+    if (!msgs) { log('ERROR', 'findCode', 'listMsgs null (API error)'); return { found: false, reason: 'api_error' }; }
+    if (!msgs.length) { log('DEBUG', 'findCode', 'no messages yet'); return { found: false, reason: 'no_messages' }; }
+
     msgs.sort((a, b) => msgTime(b) - msgTime(a));
+    if (!verifyStats.firstMsgTime) verifyStats.firstMsgTime = msgTime(msgs[0]);
+    verifyStats.lastMsgCount = msgs.length;
+
     const fresh = msgs.filter(isFresh);
-    if (!fresh.length) return { found: false, reason: 'waiting', count: msgs.length };
+    log('DEBUG', 'findCode', `msgs=${msgs.length} fresh=${fresh.length} usedIds=${usedIds.size} codeReqAt=${codeReqAt ? new Date(codeReqAt).toISOString() : 'null'}`);
+
+    if (!fresh.length) {
+        const newest = msgTime(msgs[0]);
+        log('DEBUG', 'findCode', `no fresh. newest=${new Date(newest).toISOString()} codeReqAt=${new Date(codeReqAt).toISOString()} diff=${(newest - codeReqAt)/1000}s`);
+        return { found: false, reason: 'waiting', count: msgs.length };
+    }
+
     for (const m of fresh) {
-        if (usedIds.has(m.message_id)) continue;
+        if (usedIds.has(m.message_id)) {
+            log('DEBUG', 'findCode', `skip used: ${m.message_id}`);
+            continue;
+        }
         const full = (await getMsg(inbox.id, m.message_id)) || m;
         const code = extractCode(full);
-        if (code) return { found: true, code, msgId: m.message_id, age: Math.max(0, Math.round((Date.now() - msgTime(m)) / 1000)) };
+        if (code) {
+            log('INFO', 'findCode', `FOUND code=${code} msgId=${m.message_id} subject="${(full.subject||'').slice(0,50)}"`);
+            return { found: true, code, msgId: m.message_id, age: Math.max(0, Math.round((Date.now() - msgTime(m)) / 1000)) };
+        }
+        log('DEBUG', 'findCode', `msg ${m.message_id}: no code. subject="${(full.subject||'').slice(0,80)}"`);
     }
+    log('DEBUG', 'findCode', `no code in ${fresh.length} fresh msgs`);
     return { found: false, reason: 'no_code', count: fresh.length };
 }
 
@@ -557,15 +655,35 @@ function findCodes() {
     return one ? { type: 'single', input: one } : null;
 }
 async function fillCode(code) {
+    verifyStats.fillAttempts++;
     const t = findCodes();
-    if (!t) return false;
-    if (t.type === 'single') { await typeHuman(t.input, code); return true; }
-    for (let i = 0; i < t.inputs.length && i < code.length; i++) {
-        await focusEl(t.inputs[i]);
-        setVal(t.inputs[i], code[i]);
-        fireInput(t.inputs[i], code[i]);
+    if (!t) {
+        log('ERROR', 'fillCode', 'поле для кода НЕ найдено (findCodes → null)');
+        log('DEBUG', 'fillCode', 'inputs on page: ' + [...document.querySelectorAll('input')].map(i => ({
+            id: i.id, name: i.name, type: i.type, max: i.getAttribute('maxlength'),
+            placeholder: i.placeholder, visible: i.offsetParent !== null
+        })).map(o => JSON.stringify(o)).join(' | '));
+        return false;
     }
-    return true;
+    log('INFO', 'fillCode', 'type=' + t.type + ' code=' + code);
+    try {
+        if (t.type === 'single') {
+            await typeHuman(t.input, code);
+            log('INFO', 'fillCode', 'single filled, value=' + t.input.value);
+        } else {
+            for (let i = 0; i < t.inputs.length && i < code.length; i++) {
+                await focusEl(t.inputs[i]);
+                setVal(t.inputs[i], code[i]);
+                fireInput(t.inputs[i], code[i]);
+            }
+            log('INFO', 'fillCode', 'otp filled, values=' + t.inputs.map(i => i.value).join(''));
+        }
+        verifyStats.fillSuccess++;
+        return true;
+    } catch (e) {
+        log('ERROR', 'fillCode', e);
+        return false;
+    }
 }
 function findProfile() {
     const all = [...document.querySelectorAll('input')];
@@ -592,8 +710,12 @@ function genPwd() {
 async function clickCont() {
     for (const b of document.querySelectorAll('button,a,div[role="button"]')) {
         const t = b.textContent.trim().toLowerCase();
-        if (['continue','продолжить','next','далее','create','создать'].includes(t)) return click(b);
+        if (['continue','продолжить','next','далее','create','создать'].includes(t)) {
+            log('DEBUG', 'clickCont', 'found: "' + b.textContent.trim() + '"');
+            return click(b);
+        }
     }
+    log('WARN', 'clickCont', 'кнопка Continue не найдена');
     return false;
 }
 
@@ -672,9 +794,8 @@ function showHelp() {
 <div>
 <h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600">🔧 Диагностика</h3>
 <p style="margin:0 0 6px 0;color:var(--gmut);font-size:13px">
-<b style="color:var(--gfg)">Тумблер «Диагностика»</b> в меню включает подробный лог.<br>
-<b style="color:var(--gfg)">«Скопировать отчёт»</b> — собирает состояние, DOM и логи в один текст.</p>
-<p style="margin:0;color:var(--gmut);font-size:12px">Отчёт вставьте в чат для разбора проблемы.</p></div></div>`;
+Настройки → тумблер «Подробный лог» и кнопка «Скопировать отчёт».</p>
+<p style="margin:0;color:var(--gmut);font-size:12px">Отчёт содержит состояние почты, все HTTP-ответы и шаги заполнения кода.</p></div></div>`;
     helpModal.appendChild(m);
     document.body.appendChild(helpModal);
     m.querySelector('#ch').onclick = () => { helpModal.remove(); helpModal = null; };
@@ -691,8 +812,6 @@ const ICO_REG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" str
 const ICO_CONT = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
 const ICO_SET = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
 const ICO_HELP = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
-const ICO_REPORT = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="18" x2="13" y2="18"/><line x1="9" y1="12" x2="13" y2="12"/></svg>`;
-const ICO_DEBUG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`;
 
 function setStatus(t, c) {
     if (!statusLbl) return;
@@ -701,8 +820,9 @@ function setStatus(t, c) {
 }
 
 function findLogo() {
-    for (const s of ['[data-sidebar-blossom]', 'a[href="https://chatgpt.com"] svg',
-                     '._wordmarkLink_xjnzp_1', 'header svg']) {
+    for (const s of ['[data-testid="desktop-app-shell"] > section > header svg',
+                     '[data-sidebar-blossom]', '._wordmarkLink_xjnzp_1',
+                     'a[href="https://chatgpt.com"] svg', 'header svg']) {
         const el = document.querySelector(s);
         if (el && el.getBoundingClientRect().width > 0) return el;
     }
@@ -785,29 +905,6 @@ async function pasteCtx() {
     closeMenu();
 }
 
-function mkDebugToggle(delay = 0) {
-    const b = document.createElement('button');
-    b.id = 'gdbg';
-    b.className = 'gpt-mi';
-    b.style.cssText = `display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:transparent;color:var(--gfg);border:none;border-radius:10px;cursor:pointer;font-weight:500;text-align:left;animation-delay:${delay}ms;gap:12px`;
-    const render = () => `
-<span style="display:inline-flex;align-items:center">
-<span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;margin-right:8px;opacity:.85">${ICO_DEBUG}</span>
-<span style="font-size:14px">Диагностика</span></span>
-<span style="position:relative;width:38px;height:22px;background:${C.debug ? 'var(--gfg)' : '#8e8e8e'};border-radius:999px;flex-shrink:0;transition:background .2s var(--gease)">
-<span style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s var(--gease);box-shadow:0 1px 3px rgba(0,0,0,.3);transform:translateX(${C.debug ? '16px' : '0'})"></span></span>`;
-    b.innerHTML = render();
-    b.onclick = async e => {
-        e.stopPropagation();
-        C.debug = !C.debug;
-        await save('debug', C.debug);
-        b.innerHTML = render();
-        log('INFO', 'debug', 'diagnostics ' + (C.debug ? 'ENABLED' : 'disabled'));
-        notify('Диагностика ' + (C.debug ? 'включена' : 'выключена'), 'info', 2500);
-    };
-    return b;
-}
-
 function createMenu() {
     if (menuBtn || !document.body) return;
     menuBtn = document.createElement('button');
@@ -840,18 +937,19 @@ function createMenu() {
     menuPnl.appendChild(mkBtn('gc', ICO_CONT, 'Продолжить', () => { closeMenu(); setCanContinue(false); running = false; runStage(); }, 40, 'gpt-cont'));
     menuPnl.appendChild(mkBtn('gcp', ICO_COPY, 'Копировать контекст', copyCtx, 80));
     menuPnl.appendChild(mkBtn('gps', ICO_PASTE, 'Вставить контекст', pasteCtx, 120));
-    menuPnl.appendChild(mkDebugToggle(160));
-    menuPnl.appendChild(mkBtn('grep', ICO_REPORT, 'Скопировать отчёт', () => { closeMenu(); copyReport(); }, 200));
-    menuPnl.appendChild(mkBtn('gset', ICO_SET, 'Настройки', () => { closeMenu(); openSettings(); }, 240));
-    menuPnl.appendChild(mkBtn('ghlp', ICO_HELP, 'Помощь', () => { closeMenu(); showHelp(); }, 280));
+    menuPnl.appendChild(mkBtn('gset', ICO_SET, 'Настройки', () => { closeMenu(); openSettings(); }, 160));
+    menuPnl.appendChild(mkBtn('ghlp', ICO_HELP, 'Помощь', () => { closeMenu(); showHelp(); }, 200));
 
     document.body.appendChild(menuBtn);
     document.body.appendChild(menuPnl);
     document.body.appendChild(statusLbl);
 
     posMenu();
+    setTimeout(posMenu, 100);
+    setTimeout(posMenu, 500);
+    setTimeout(posMenu, 1500);
     addEventListener('resize', posMenu);
-    setInterval(posMenu, 1000);
+    setInterval(posMenu, 2000);
     document.addEventListener('click', e => {
         if (menuPnl && menuPnl.style.display === 'flex' &&
             !menuPnl.contains(e.target) && !menuBtn.contains(e.target)) closeMenu();
@@ -864,8 +962,8 @@ function urlWatch(cb, timeout = 15000) {
     const last = location.href;
     let el = 0;
     urlTimer = setInterval(() => {
-        if (location.href !== last) { stopUrl(); cb(); }
-        else if ((el += 500) >= timeout) { stopUrl(); cb(true); }
+        if (location.href !== last) { stopUrl(); log('INFO', 'urlWatch', last + ' → ' + location.href); cb(); }
+        else if ((el += 500) >= timeout) { stopUrl(); log('WARN', 'urlWatch', 'timeout ' + timeout + 'ms'); cb(true); }
     }, 500);
 }
 function stopUrl() { if (urlTimer) { clearInterval(urlTimer); urlTimer = null; } }
@@ -917,11 +1015,15 @@ async function stageLogin() {
             notify(`Почта: ${email}`, 'info', 6000);
         }
         codeReqAt = Date.now();
+        verifyStats.codeReqTime = codeReqAt;
+        verifyStats.inboxId = inbox.id;
+        verifyStats.inboxEmail = inbox.email;
         usedIds = new Set();
         await save('usedIds', []);
         await save('codeReqAt', codeReqAt);
         await save('inbox', inbox);
         await save('email', email);
+        log('INFO', 'stageLogin', 'created inbox: ' + JSON.stringify(inbox) + ' codeReqAt=' + new Date(codeReqAt).toISOString());
     } else {
         const saved = await load('inbox');
         if (!saved?.id) { notify('Нет сохранённой почты', 'warn', 6000); return setStatus(''); }
@@ -970,17 +1072,23 @@ async function stagePwd() {
 async function watchCode() {
     const start = Date.now();
     setCanContinue(true);
+    log('INFO', 'watchCode', 'started');
     while (Date.now() - start < 120000) {
         await sleep(1500);
-        if (regDone) { setCanContinue(false); return; }
+        if (regDone) { setCanContinue(false); log('INFO', 'watchCode', 'regDone'); return; }
         if (onProfile() || findPwd() || onAboutYou()) {
+            log('INFO', 'watchCode', 'next stage detected: profile=' + onProfile() + ' pwd=' + !!findPwd() + ' aboutYou=' + onAboutYou());
             setCanContinue(false); running = false; return runStage();
         }
         if (!findCodes()) {
             await sleep(1000);
-            if (!findCodes()) { setCanContinue(false); running = false; return runStage(); }
+            if (!findCodes()) {
+                log('INFO', 'watchCode', 'code field disappeared');
+                setCanContinue(false); running = false; return runStage();
+            }
         }
     }
+    log('WARN', 'watchCode', 'timeout 120s');
     notify('Авто-переход не сработал. Нажмите «Продолжить».', 'warn', 12000);
 }
 
@@ -988,6 +1096,8 @@ async function stageVerify() {
     if (verifyDone || regDone || polling) return;
     if (codeDone) { verifyDone = true; return stageProfile(); }
     polling = true;
+    verifyStats.attempts = 0;
+
     if (codeReqAt == null) codeReqAt = (await load('codeReqAt')) || Date.now();
     if (!inbox?.id) inbox = await load('inbox');
     if (!inbox?.id) {
@@ -1002,25 +1112,38 @@ async function stageVerify() {
         notify('Нет ящика. Создайте новую регистрацию.', 'err', 10000);
         polling = false; return;
     }
+    verifyStats.inboxId = inbox.id;
+    verifyStats.inboxEmail = inbox.email;
+    log('INFO', 'stageVerify', 'start inbox=' + inbox.email + ' codeReqAt=' + new Date(codeReqAt).toISOString());
     notify(`Проверка: ${inbox.email}`, 'info', 4000);
 
     for (let i = 0; i < C.maxTries; i++) {
         const at = i + 1;
+        verifyStats.attempts = at;
         if (at <= 3 || at % 5 === 0) { notify(`Проверка #${at}/${C.maxTries}`, 'dbg', 2000); setStatus(`#${at}`); }
         const r = await findCode();
+        verifyStats.lastReason = r.reason;
+        if (r.count) verifyStats.lastMsgCount = r.count;
+
         if (r.found && r.code) {
+            verifyStats.lastCode = r.code;
+            verifyStats.lastCodeAge = r.age;
             notify(`Код: ${r.code} (${r.age}с)`, 'info', 8000);
             setStatus('Код…');
-            if (await fillCode(r.code)) {
+            const filled = await fillCode(r.code);
+            if (filled) {
                 codeDone = true; verifyDone = true;
                 usedIds.add(r.msgId);
                 await save('usedIds', [...usedIds]);
                 await delay(200, 500);
+                log('INFO', 'stageVerify', 'clicking Continue after code');
                 await clickCont();
+                log('INFO', 'stageVerify', 'waiting for URL change after code');
                 urlWatch(() => { if (!regDone) { running = false; runStage(); } }, 25000);
                 watchCode();
                 break;
             } else {
+                log('ERROR', 'stageVerify', 'fillCode returned false');
                 notify(`Код: ${r.code} (введите вручную)`, 'info', 10000);
                 polling = false; return;
             }
@@ -1032,6 +1155,7 @@ async function stageVerify() {
         await sleep(C.interval);
     }
     polling = false;
+    log('WARN', 'stageVerify', 'loop ended, attempts=' + verifyStats.attempts);
     setTimeout(() => { if (!regDone) { running = false; runStage(); } }, 1000);
 }
 
@@ -1102,6 +1226,13 @@ async function startReg() {
     setStatus('Старт');
     loginTried = false; verifyDone = false; codeDone = false; pwdDone = false;
     notifyDone = false; setCanContinue(false);
+    verifyStats.attempts = 0;
+    verifyStats.lastReason = null;
+    verifyStats.lastCode = null;
+    verifyStats.fillAttempts = 0;
+    verifyStats.fillSuccess = 0;
+    verifyStats.firstMsgTime = null;
+    verifyStats.lastApiError = null;
     running = false;
     try { await runStage(); }
     finally { setTimeout(() => setStatus(''), 1500); }
@@ -1132,6 +1263,7 @@ async function init() {
         ((await load('usedIds')) || []).forEach(id => usedIds.add(id));
         ctx = await load('ctx');
         inbox = await load('inbox');
+        if (inbox?.id) { verifyStats.inboxId = inbox.id; verifyStats.inboxEmail = inbox.email; }
         log('INFO', 'init', 'loaded: mode=' + C.mode + ' debug=' + C.debug + ' amKey=' + (C.amKey ? 'yes' : 'no'));
 
         const comp = await load('complete');
