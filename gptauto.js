@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ChatGPT Auto Register (AgentMail)
+// @name         ChatGPT Auto Register (AgentMail + SimpleLogin)
 // @namespace    http://tampermonkey.net/
-// @version      62.0
-// @description  Авторегистрация ChatGPT через AgentMail.to + настройки + авто-тема
+// @version      63.0
+// @description  Авторегистрация ChatGPT через AgentMail.to (и опционально SimpleLogin) + кнопка + авто-тема
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://auth.openai.com/*
@@ -11,6 +11,7 @@
 // @grant        GM.setValue
 // @grant        GM_setClipboard
 // @connect      api.agentmail.to
+// @connect      app.simplelogin.io
 // @run-at       document-end
 // ==/UserScript==
 
@@ -21,12 +22,22 @@
     // CONFIG
     // ============================================
     const CONFIG = {
-        agentMailApiKey: '',            // заполняется через форму настроек
+        // AgentMail — создаёт ящики и принимает письма
+        agentMailApiKey: '',
         agentMailBase: 'https://api.agentmail.to/v0',
+
+        // SimpleLogin — опционально: создаёт алиасы, пересылающие на AgentMail
+        simpleLoginApiKey: '',
+        simpleLoginBase: 'https://app.simplelogin.io',
+
+        // Режим работы: 'agentmail' | 'simplelogin'
+        emailMode: 'agentmail',
+
         checkInterval: 3000,
         maxAttempts: 120,
         timeToleranceMs: 60000,
         fastMode: true,
+        deleteInboxAfterUse: true,
     };
 
     let codeInserted = false, profileFilled = false, registrationComplete = false,
@@ -86,6 +97,8 @@
             .gpt-input:focus { outline: 2px solid var(--gpt-accent); outline-offset: -1px; }
             .gpt-label { display: block; margin-bottom: 6px; color: var(--gpt-fg); font-size: 13px; font-weight: 600; }
             .gpt-hint { color: var(--gpt-fg-muted); font-size: 12px; margin-top: 4px; line-height: 1.4; }
+            .gpt-radio-row { display: flex; gap: 12px; margin-bottom: 16px; }
+            .gpt-radio-row label { display: flex; align-items: center; gap: 6px; color: var(--gpt-fg); font-size: 14px; cursor: pointer; }
         `;
         document.head.appendChild(s);
     }
@@ -180,48 +193,48 @@
     }
 
     // ============================================
-    // НАСТРОЙКИ (форма ввода ключей)
+    // НАСТРОЙКИ
     // ============================================
-    function showSettingsDialog(opts = {}) {
+    function showSettingsDialog() {
         return new Promise((resolve) => {
             if (settingsModal) settingsModal.remove();
             settingsModal = document.createElement('div');
             settingsModal.style.cssText = 'position:fixed;inset:0;background:var(--gpt-overlay);z-index:999999;display:flex;align-items:center;justify-content:center;';
 
             const dialog = document.createElement('div');
-            dialog.style.cssText = `background:var(--gpt-bg);color:var(--gpt-fg);padding:24px;border-radius:16px;max-width:460px;width:90%;box-shadow:0 10px 40px var(--gpt-shadow);`;
+            dialog.style.cssText = `background:var(--gpt-bg);color:var(--gpt-fg);padding:24px;border-radius:16px;max-width:480px;width:90%;box-shadow:0 10px 40px var(--gpt-shadow);`;
 
             dialog.innerHTML = `
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
                     <h2 style="margin:0;color:var(--gpt-fg);font-size:18px;">Настройки скрипта</h2>
                     <button id="closeSettings" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--gpt-fg-muted);padding:0 5px;">×</button>
                 </div>
-                <p style="color:var(--gpt-fg-muted);font-size:12px;margin:0 0 20px 0;">
-                    Ключи сохраняются в хранилище Tampermonkey и используются автоматически при следующих запусках.
+                <p style="color:var(--gpt-fg-muted);font-size:12px;margin:0 0 16px 0;">
+                    Ключи сохраняются в хранилище Tampermonkey и используются автоматически.
                 </p>
+
+                <label class="gpt-label">Режим работы</label>
+                <div class="gpt-radio-row">
+                    <label><input type="radio" name="emailMode" value="agentmail" ${CONFIG.emailMode === 'agentmail' ? 'checked' : ''}> AgentMail (прямой)</label>
+                    <label><input type="radio" name="emailMode" value="simplelogin" ${CONFIG.emailMode === 'simplelogin' ? 'checked' : ''}> SimpleLogin (алиас)</label>
+                </div>
 
                 <label class="gpt-label">AgentMail API Key <span style="color:var(--gpt-accent);">*</span></label>
                 <input id="agentmail-input" class="gpt-input" type="password" placeholder="am_..." autocomplete="off">
-                <p class="gpt-hint">Получить: console.agentmail.to → API Keys → Create New API Key</p>
+                <p class="gpt-hint">console.agentmail.to → API Keys → Create New API Key</p>
 
-                <div style="height:18px;"></div>
+                <div style="height:14px;"></div>
 
                 <label class="gpt-label">SimpleLogin API Key <span style="color:var(--gpt-fg-muted);font-weight:400;">(опционально)</span></label>
                 <input id="simplelogin-input" class="gpt-input" type="password" placeholder="sl_..." autocomplete="off">
-                <p class="gpt-hint">Если оставить пустым — не используется.</p>
+                <p class="gpt-hint">Требуется только если выбран режим SimpleLogin.</p>
 
-                <div style="height:22px;"></div>
+                <div style="height:20px;"></div>
 
                 <div style="display:flex;flex-direction:column;gap:10px;">
-                    <button id="saveSettings" style="padding:14px;background:var(--gpt-accent);color:white;border:none;border-radius:12px;font-size:15px;cursor:pointer;font-weight:600;">
-                        Сохранить
-                    </button>
-                    <button id="clearSettings" style="padding:10px;background:transparent;color:var(--gpt-danger);border:1px solid var(--gpt-border);border-radius:10px;font-size:13px;cursor:pointer;">
-                        Удалить сохранённые ключи
-                    </button>
-                    <button id="cancelSettings" style="padding:12px;background:transparent;color:var(--gpt-fg-muted);border:none;font-size:14px;cursor:pointer;">
-                        Отмена
-                    </button>
+                    <button id="saveSettings" style="padding:14px;background:var(--gpt-accent);color:white;border:none;border-radius:12px;font-size:15px;cursor:pointer;font-weight:600;">Сохранить</button>
+                    <button id="clearSettings" style="padding:10px;background:transparent;color:var(--gpt-danger);border:1px solid var(--gpt-border);border-radius:10px;font-size:13px;cursor:pointer;">Удалить ключи</button>
+                    <button id="cancelSettings" style="padding:12px;background:transparent;color:var(--gpt-fg-muted);border:none;font-size:14px;cursor:pointer;">Отмена</button>
                 </div>
             `;
 
@@ -230,47 +243,43 @@
 
             const agentInput = dialog.querySelector('#agentmail-input');
             const slInput = dialog.querySelector('#simplelogin-input');
-
-            // Предзаполняем существующими значениями
             if (CONFIG.agentMailApiKey) agentInput.value = CONFIG.agentMailApiKey;
+            if (CONFIG.simpleLoginApiKey) slInput.value = CONFIG.simpleLoginApiKey;
 
-            const close = (result) => {
-                settingsModal.remove();
-                settingsModal = null;
-                resolve(result);
-            };
+            const close = (result) => { settingsModal.remove(); settingsModal = null; resolve(result); };
 
             dialog.querySelector('#closeSettings').onclick = () => close(null);
             dialog.querySelector('#cancelSettings').onclick = () => close(null);
             settingsModal.onclick = (e) => { if (e.target === settingsModal) close(null); };
 
             dialog.querySelector('#saveSettings').onclick = async () => {
+                const mode = dialog.querySelector('input[name="emailMode"]:checked').value;
                 const agentMail = agentInput.value.trim();
                 const simpleLogin = slInput.value.trim();
 
-                if (!agentMail) {
-                    showNotification('Укажите AgentMail API Key', 'error', 4000);
-                    return;
-                }
-                if (!agentMail.startsWith('am_')) {
-                    showNotification('AgentMail ключ обычно начинается с "am_"', 'warning', 5000);
+                if (!agentMail) { showNotification('Укажите AgentMail API Key', 'error', 4000); return; }
+                if (mode === 'simplelogin' && !simpleLogin) {
+                    showNotification('Для режима SimpleLogin укажите SimpleLogin API Key', 'error', 5000); return;
                 }
 
                 await saveData('agentMailApiKey', agentMail);
                 await saveData('simpleLoginApiKey', simpleLogin || null);
+                await saveData('emailMode', mode);
 
                 CONFIG.agentMailApiKey = agentMail;
+                CONFIG.simpleLoginApiKey = simpleLogin;
+                CONFIG.emailMode = mode;
 
                 showNotification('Настройки сохранены', 'success', 3000);
-                close({ agentMail, simpleLogin });
+                close({ agentMail, simpleLogin, mode });
             };
 
             dialog.querySelector('#clearSettings').onclick = async () => {
                 await saveData('agentMailApiKey', null);
                 await saveData('simpleLoginApiKey', null);
-                CONFIG.agentMailApiKey = '';
-                agentInput.value = '';
-                slInput.value = '';
+                await saveData('emailMode', null);
+                CONFIG.agentMailApiKey = ''; CONFIG.simpleLoginApiKey = ''; CONFIG.emailMode = 'agentmail';
+                agentInput.value = ''; slInput.value = '';
                 showNotification('Ключи удалены', 'info', 3000);
             };
 
@@ -279,25 +288,30 @@
     }
 
     async function ensureApiKeys() {
-        const saved = await getData('agentMailApiKey');
-        if (saved) {
-            CONFIG.agentMailApiKey = saved;
+        const savedKey = await getData('agentMailApiKey');
+        if (savedKey) {
+            CONFIG.agentMailApiKey = savedKey;
+            CONFIG.simpleLoginApiKey = (await getData('simpleLoginApiKey')) || '';
+            CONFIG.emailMode = (await getData('emailMode')) || 'agentmail';
             return true;
         }
         const result = await showSettingsDialog();
-        if (!result) return false;
-        return true;
+        return !!result;
     }
 
     // ============================================
-    // AGENTMAIL: создание ящика
+    // AGENTMAIL
     // ============================================
+    function generateInboxUsername() {
+        const adj = ['swift', 'bright', 'calm', 'bold', 'keen', 'pure', 'warm', 'cool', 'fast', 'clear'];
+        const noun = ['fox', 'hawk', 'wolf', 'bear', 'lion', 'tiger', 'eagle', 'shark', 'puma', 'owl'];
+        return adj[Math.floor(Math.random() * adj.length)] + '-' + noun[Math.floor(Math.random() * noun.length)] + '-' + Date.now().toString(36);
+    }
+
     function createAgentMailInbox() {
         return new Promise((resolve) => {
-            if (!CONFIG.agentMailApiKey) {
-                showNotification('AgentMail: ключ не задан (откройте Настройки)', 'error', 10000);
-                resolve(null); return;
-            }
+            if (!CONFIG.agentMailApiKey) { showNotification('AgentMail: ключ не задан', 'error', 10000); resolve(null); return; }
+            const username = generateInboxUsername();
             GM_xmlhttpRequest({
                 method: 'POST',
                 url: `${CONFIG.agentMailBase}/inboxes`,
@@ -306,7 +320,7 @@
                     'Content-Type': 'application/json',
                     'Accept': 'application/json'
                 },
-                data: JSON.stringify({ displayName: 'ChatGPT Auto' }),
+                data: JSON.stringify({ username, displayName: 'ChatGPT Auto' }),
                 onload: (resp) => {
                     if (resp.status !== 200 && resp.status !== 201) {
                         showNotification(`AgentMail: ${resp.status} ${resp.responseText.slice(0, 150)}`, 'error', 12000);
@@ -314,14 +328,25 @@
                     }
                     try {
                         const data = JSON.parse(resp.responseText);
-                        resolve({
-                            inboxId: data.inbox_id,
-                            email: data.inbox_id || data.email || data.address
-                        });
+                        resolve({ inboxId: data.inbox_id, email: data.inbox_id || data.email, username });
                     } catch (e) { resolve(null); }
                 },
                 onerror: () => { showNotification('AgentMail: сетевая ошибка', 'error'); resolve(null); },
                 ontimeout: () => { showNotification('AgentMail: таймаут', 'error'); resolve(null); }
+            });
+        });
+    }
+
+    function deleteAgentMailInbox(inboxId) {
+        return new Promise((resolve) => {
+            if (!inboxId) { resolve(false); return; }
+            GM_xmlhttpRequest({
+                method: 'DELETE',
+                url: `${CONFIG.agentMailBase}/inboxes/${encodeURIComponent(inboxId)}`,
+                headers: { 'Authorization': `Bearer ${CONFIG.agentMailApiKey}` },
+                onload: (resp) => resolve(resp.status === 200 || resp.status === 204),
+                onerror: () => resolve(false),
+                ontimeout: () => resolve(false)
             });
         });
     }
@@ -331,14 +356,10 @@
             GM_xmlhttpRequest({
                 method: 'GET',
                 url: `${CONFIG.agentMailBase}/inboxes/${encodeURIComponent(inboxId)}/messages?limit=10`,
-                headers: {
-                    'Authorization': `Bearer ${CONFIG.agentMailApiKey}`,
-                    'Accept': 'application/json'
-                },
+                headers: { 'Authorization': `Bearer ${CONFIG.agentMailApiKey}`, 'Accept': 'application/json' },
                 onload: (resp) => {
                     if (resp.status !== 200) { resolve(null); return; }
-                    try { resolve(JSON.parse(resp.responseText).messages || []); }
-                    catch (e) { resolve(null); }
+                    try { resolve(JSON.parse(resp.responseText).messages || []); } catch (e) { resolve(null); }
                 },
                 onerror: () => resolve(null),
                 ontimeout: () => resolve(null)
@@ -351,17 +372,44 @@
             GM_xmlhttpRequest({
                 method: 'GET',
                 url: `${CONFIG.agentMailBase}/inboxes/${encodeURIComponent(inboxId)}/messages/${encodeURIComponent(messageId)}`,
-                headers: {
-                    'Authorization': `Bearer ${CONFIG.agentMailApiKey}`,
-                    'Accept': 'application/json'
-                },
+                headers: { 'Authorization': `Bearer ${CONFIG.agentMailApiKey}`, 'Accept': 'application/json' },
                 onload: (resp) => {
                     if (resp.status !== 200) { resolve(null); return; }
-                    try { resolve(JSON.parse(resp.responseText)); }
-                    catch (e) { resolve(null); }
+                    try { resolve(JSON.parse(resp.responseText)); } catch (e) { resolve(null); }
                 },
                 onerror: () => resolve(null),
                 ontimeout: () => resolve(null)
+            });
+        });
+    }
+
+    // ============================================
+    // SIMPLELOGIN
+    // ============================================
+    function createSimpleLoginAlias() {
+        return new Promise((resolve) => {
+            if (!CONFIG.simpleLoginApiKey) { showNotification('SimpleLogin: ключ не задан', 'error', 10000); resolve(null); return; }
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: `${CONFIG.simpleLoginBase}/api/alias/random/new`,
+                headers: {
+                    'Authentication': CONFIG.simpleLoginApiKey,
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                data: JSON.stringify({ note: 'ChatGPT Auto' }),
+                onload: (resp) => {
+                    if (resp.status !== 200 && resp.status !== 201) {
+                        showNotification(`SimpleLogin: ${resp.status} ${resp.responseText.slice(0, 150)}`, 'error', 12000);
+                        resolve(null); return;
+                    }
+                    try {
+                        const data = JSON.parse(resp.responseText);
+                        resolve(data.alias || data.email);
+                    } catch (e) { resolve(null); }
+                },
+                onerror: () => { showNotification('SimpleLogin: сетевая ошибка', 'error'); resolve(null); },
+                ontimeout: () => { showNotification('SimpleLogin: таймаут', 'error'); resolve(null); }
             });
         });
     }
@@ -371,15 +419,8 @@
     // ============================================
     function extractCode(emailData) {
         if (!emailData) return null;
-        const raw = [
-            emailData.extracted_text,
-            emailData.extracted_html,
-            emailData.text,
-            emailData.html,
-            emailData.subject
-        ].filter(Boolean).join('\n')
-            .replace(/<[^>]*>/g, ' ')
-            .replace(/&nbsp;|&#160;/g, ' ');
+        const raw = [emailData.extracted_text, emailData.extracted_html, emailData.text, emailData.html, emailData.subject]
+            .filter(Boolean).join('\n').replace(/<[^>]*>/g, ' ').replace(/&nbsp;|&#160;/g, ' ');
         const glued = raw.replace(/(\d)[\s\u00a0]+(?=\d)/g, '$1');
         const m = glued.match(/(?:код|code|verification)[^\d\n]{0,40}(\d{6})/i) || glued.match(/\b(\d{6})\b/);
         if (m && !/^(19|20)\d{2}$/.test(m[1])) return m[1];
@@ -406,16 +447,13 @@
             if (usedMessageIds.has(msg.message_id)) continue;
             const full = (await getAgentMailMessage(currentInbox.inboxId, msg.message_id)) || msg;
             const code = extractCode(full);
-            if (code) return {
-                found: true, code, messageId: msg.message_id,
-                ageSec: Math.max(0, Math.round((Date.now() - msgTime(msg)) / 1000))
-            };
+            if (code) return { found: true, code, messageId: msg.message_id, ageSec: Math.max(0, Math.round((Date.now() - msgTime(msg)) / 1000)) };
         }
         return { found: false, reason: 'no_code_in_fresh', count: fresh.length };
     }
 
     // ============================================
-    // ВВОД В ПОЛЯ
+    // ВВОД В ПОЛЯ (как в оригинале)
     // ============================================
     function fillInput(input, value) {
         if (!input) return false;
@@ -548,18 +586,18 @@
             dialog.innerHTML = `
                 <h2 style="margin:0 0 16px;color:var(--gpt-fg);">Регистрация ChatGPT</h2>
                 <p style="color:var(--gpt-fg-muted);font-size:13px;margin-bottom:16px;">
-                    Почта: <b>AgentMail.to</b>
+                    Режим: <b>${CONFIG.emailMode === 'simplelogin' ? 'SimpleLogin → AgentMail' : 'AgentMail (прямой)'}</b>
                 </p>
                 <p style="color:var(--gpt-fg-muted);font-size:12px;" id="oldEmailDisplay"></p>
                 <div style="display:flex;flex-direction:column;gap:10px;">
-                    <button id="newEmailBtn" style="padding:14px;background:var(--gpt-accent);color:white;border:none;border-radius:12px;font-size:15px;cursor:pointer;">Создать новый inbox</button>
-                    <button id="oldEmailBtn" style="padding:14px;background:var(--gpt-hover);color:var(--gpt-fg);border:1px solid var(--gpt-border);border-radius:12px;font-size:15px;cursor:pointer;display:none;">Продолжить прошлый</button>
+                    <button id="newEmailBtn" style="padding:14px;background:var(--gpt-accent);color:white;border:none;border-radius:12px;font-size:15px;cursor:pointer;">Новая регистрация</button>
+                    <button id="oldEmailBtn" style="padding:14px;background:var(--gpt-hover);color:var(--gpt-fg);border:1px solid var(--gpt-border);border-radius:12px;font-size:15px;cursor:pointer;display:none;">Продолжить прошлую</button>
                     <button id="cancelBtn" style="padding:12px;background:transparent;color:var(--gpt-fg-muted);border:none;font-size:14px;cursor:pointer;">Отмена</button>
                 </div>`;
             overlay.appendChild(dialog); document.body.appendChild(overlay);
-            const oldInbox = await getData('currentInbox');
-            dialog.querySelector('#oldEmailDisplay').textContent = oldInbox ? `📧 ${oldInbox.email}` : '';
-            if (oldInbox) dialog.querySelector('#oldEmailBtn').style.display = 'block';
+            const old = await getData('currentInbox');
+            dialog.querySelector('#oldEmailDisplay').textContent = old ? `📧 ${old.email}` : '';
+            if (old) dialog.querySelector('#oldEmailBtn').style.display = 'block';
             dialog.querySelector('#newEmailBtn').onclick = async () => { overlay.remove(); await saveData('currentInbox', null); resolve('new'); };
             dialog.querySelector('#oldEmailBtn').onclick = () => { overlay.remove(); resolve('old'); };
             dialog.querySelector('#cancelBtn').onclick = () => { overlay.remove(); resolve('cancel'); };
@@ -568,7 +606,7 @@
     }
 
     // ============================================
-    // МОДАЛКА ПОМОЩИ
+    // МОДАЛКА ПОМОЩИ (полная переработка)
     // ============================================
     function showHelpModal() {
         if (helpModal) helpModal.remove();
@@ -576,7 +614,7 @@
         helpModal.style.cssText = 'position:fixed;inset:0;background:var(--gpt-overlay);z-index:999999;display:flex;align-items:center;justify-content:center;';
 
         const modal = document.createElement('div');
-        modal.style.cssText = `background:var(--gpt-bg);color:var(--gpt-fg);padding:24px;border-radius:16px;max-width:620px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:0 10px 40px var(--gpt-shadow);`;
+        modal.style.cssText = `background:var(--gpt-bg);color:var(--gpt-fg);padding:24px;border-radius:16px;max-width:640px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:0 10px 40px var(--gpt-shadow);`;
 
         modal.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
@@ -587,45 +625,73 @@
             <div style="color:var(--gpt-fg);line-height:1.6;font-size:14px;">
 
                 <div style="margin-bottom:22px;">
-                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">🔑 Шаг 1. Настройка ключа</h3>
+                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">🔑 Шаг 1. Получение ключей</h3>
+                    <p style="margin:0 0 10px 0;"><b>AgentMail (обязательно):</b></p>
+                    <ol style="margin:0 0 12px 20px;">
+                        <li>Откройте <b>console.agentmail.to</b> и войдите.</li>
+                        <li>Раздел <b>API Keys</b> → <b>Create New API Key</b>.</li>
+                        <li>Скопируйте ключ (начинается с <code>am_</code>).</li>
+                    </ol>
+                    <p style="margin:0 0 10px 0;"><b>SimpleLogin (только для режима «SimpleLogin»):</b></p>
+                    <ol style="margin:0 0 0 20px;">
+                        <li>Откройте <b>app.simplelogin.io/dashboard/api_key</b>.</li>
+                        <li>Нажмите <b>Create</b>, скопируйте ключ.</li>
+                    </ol>
+                </div>
+
+                <div style="margin-bottom:22px;">
+                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">⚙️ Шаг 2. Настройка скрипта</h3>
                     <ol style="margin:0;padding-left:20px;">
-                        <li style="margin-bottom:6px;">Откройте <b>console.agentmail.to</b> и войдите в аккаунт.</li>
-                        <li style="margin-bottom:6px;">Перейдите в <b>API Keys</b> → <b>Create New API Key</b>.</li>
-                        <li style="margin-bottom:6px;">Скопируйте ключ (начинается с <code>am_</code>).</li>
-                        <li>В скрипте нажмите <b>☰ → Настройки</b> и вставьте ключ. Нажмите <b>Сохранить</b>.</li>
+                        <li>Откройте <b>☰ → Настройки</b> на странице ChatGPT.</li>
+                        <li>Выберите режим: <b>AgentMail</b> (прямой) или <b>SimpleLogin</b> (через алиас).</li>
+                        <li>Вставьте ключи и нажмите <b>Сохранить</b>.</li>
+                    </ol>
+                </div>
+
+                <div style="margin-bottom:22px;">
+                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">📧 Режим SimpleLogin: подготовка AgentMail вручную</h3>
+                    <p style="margin:0 0 10px 0;color:var(--gpt-fg-muted);">
+                        В этом режиме регистрация идёт через алиас SimpleLogin, но письма принимает AgentMail. Нужно один раз вручную создать постоянный ящик в AgentMail и привязать его как mailbox в SimpleLogin.
+                    </p>
+                    <ol style="margin:0;padding-left:20px;">
+                        <li>Войдите в <b>console.agentmail.to</b>.</li>
+                        <li>Создайте новый inbox (например, <code>chatgpt-relay@agentmail.to</code>).</li>
+                        <li>В <b>app.simplelogin.io → Mailboxes</b> нажмите <b>Add Mailbox</b>.</li>
+                        <li>Введите адрес этого AgentMail-ящика и подтвердите письмо.</li>
+                        <li>Сделайте его <b>дефолтным</b> — тогда все алиасы будут пересылать туда.</li>
                     </ol>
                     <p style="margin:10px 0 0 0;color:var(--gpt-fg-muted);font-size:13px;">
-                        Ключ сохраняется один раз и используется автоматически при следующих запусках.
+                        ⚠️ После подтверждения mailbox <b>не удаляйте</b> его в AgentMail — иначе алиасы перестанут работать.
                     </p>
                 </div>
 
                 <div style="margin-bottom:22px;">
-                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">🚀 Шаг 2. Регистрация</h3>
+                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">🚀 Шаг 3. Регистрация</h3>
                     <ol style="margin:0;padding-left:20px;">
-                        <li style="margin-bottom:6px;">Откройте <b>chatgpt.com</b>. Убедитесь, что вы <b>не авторизованы</b>.</li>
-                        <li style="margin-bottom:6px;">Нажмите кнопку <b>⚡ Регистрация</b> в левом верхнем углу.</li>
-                        <li style="margin-bottom:6px;">В диалоге выберите <b>«Создать новый inbox»</b>.</li>
-                        <li style="margin-bottom:6px;">Скрипт сам: создаст ящик AgentMail → введёт email → дождётся письма → подставит код → заполнит профиль.</li>
-                        <li>Дождитесь сообщения <b>«Регистрация завершена!»</b>.</li>
+                        <li>Откройте <b>chatgpt.com</b>, убедитесь, что вы не авторизованы.</li>
+                        <li>Нажмите <b>⚡ Регистрация</b> слева сверху.</li>
+                        <li>Выберите <b>«Новая регистрация»</b>.</li>
+                        <li>Скрипт сам: создаст почту → введёт email → дождётся кода → вставит код → заполнит профиль.</li>
+                        <li>После успеха временный ящик <b>удаляется</b> автоматически.</li>
                     </ol>
                 </div>
 
                 <div style="margin-bottom:22px;">
-                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">📋 Шаг 3. Перенос контекста чата</h3>
+                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">📋 Шаг 4. Перенос контекста чата</h3>
                     <ol style="margin:0;padding-left:20px;">
-                        <li style="margin-bottom:6px;">В старом аккаунте нажмите <b>☰ → Копировать контекст</b>.</li>
-                        <li style="margin-bottom:6px;">Выйдите из аккаунта (Avatar → Log out).</li>
-                        <li style="margin-bottom:6px;">Зарегистрируйте новый аккаунт через <b>⚡ Регистрация</b>.</li>
-                        <li>В новом чате нажмите <b>☰ → Вставить контекст</b>.</li>
+                        <li>В старом аккаунте: <b>☰ → Копировать контекст</b>.</li>
+                        <li>Выйдите из аккаунта (Avatar → Log out).</li>
+                        <li>Зарегистрируйте новый аккаунт через <b>⚡ Регистрация</b>.</li>
+                        <li>В новом чате: <b>☰ → Вставить контекст</b>.</li>
                     </ol>
                 </div>
 
                 <div>
                     <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">⚙️ Управление ключами</h3>
                     <ul style="margin:0;padding-left:20px;">
-                        <li style="margin-bottom:6px;"><b>Изменить ключ:</b> ☰ → Настройки → введите новый → Сохранить.</li>
-                        <li style="margin-bottom:6px;"><b>Удалить ключ:</b> ☰ → Настройки → «Удалить сохранённые ключи».</li>
-                        <li><b>Или вручную:</b> Tampermonkey Dashboard → ваш скрипт → Storage → удалить <code>chatgpt_helper_agentMailApiKey</code>.</li>
+                        <li><b>Изменить:</b> ☰ → Настройки → ввести новые → Сохранить.</li>
+                        <li><b>Удалить:</b> ☰ → Настройки → «Удалить ключи».</li>
+                        <li><b>Вручную:</b> Tampermonkey Dashboard → ваш скрипт → Storage.</li>
                     </ul>
                 </div>
 
@@ -638,7 +704,7 @@
     }
 
     // ============================================
-    // КОНТЕКСТНОЕ МЕНЮ
+    // КОНТЕКСТНОЕ МЕНЮ (с копированием/вставкой)
     // ============================================
     let contextMenuWrapper = null;
     let contextMenuPanel = null;
@@ -762,7 +828,7 @@
     }
 
     // ============================================
-    // КНОПКА ЗАПУСКА РЕГИСТРАЦИИ
+    // КНОПКА ЗАПУСКА
     // ============================================
     let regButton = null;
 
@@ -796,10 +862,7 @@
         regButton.addEventListener('mousedown', () => { regButton.style.transform = 'scale(0.97)'; });
         regButton.addEventListener('mouseup', () => { regButton.style.transform = 'scale(1)'; });
 
-        regButton.onclick = (e) => {
-            e.stopPropagation();
-            startRegistrationManual();
-        };
+        regButton.onclick = (e) => { e.stopPropagation(); startRegistrationManual(); };
         document.body.appendChild(regButton);
     }
 
@@ -816,13 +879,8 @@
             if (registrationComplete) showNotification('Регистрация уже завершена', 'info', 3000);
             return;
         }
-
-        // Проверяем ключи перед запуском
         const hasKeys = await ensureApiKeys();
-        if (!hasKeys) {
-            showNotification('Настройка отменена', 'warning', 4000);
-            return;
-        }
+        if (!hasKeys) { showNotification('Настройка отменена', 'warning', 4000); return; }
 
         setRegisterButtonLabel('Запуск…', 'running');
         try {
@@ -901,23 +959,37 @@
 
         let emailToUse;
         if (choice === 'new') {
-            setRegisterButtonLabel('Создаю inbox…', 'running');
-            showNotification('AgentMail: создаю inbox…', 'info', 4000);
-            const inbox = await createAgentMailInbox();
-            if (!inbox) { setRegisterButtonLabel('Регистрация', 'error'); return; }
-            currentInbox = inbox;
-            emailToUse = inbox.email;
+            setRegisterButtonLabel('Создаю почту…', 'running');
+
+            // Создаём постоянный AgentMail-ящик для приёма (используется всегда)
+            const relayInbox = await createAgentMailInbox();
+            if (!relayInbox) { setRegisterButtonLabel('Регистрация', 'error'); return; }
+            currentInbox = relayInbox;
+
+            if (CONFIG.emailMode === 'simplelogin') {
+                // В режиме SimpleLogin — создаём алиас, который пересылает на AgentMail
+                showNotification('SimpleLogin: создаю алиас…', 'info', 4000);
+                const alias = await createSimpleLoginAlias();
+                if (!alias) { setRegisterButtonLabel('Регистрация', 'error'); return; }
+                emailToUse = alias;
+                showNotification(`Алиас: ${alias} → ${relayInbox.email}`, 'success', 6000);
+            } else {
+                // Прямой режим — используем сам AgentMail
+                emailToUse = relayInbox.email;
+                showNotification(`Почта: ${emailToUse}`, 'success', 6000);
+            }
+
             codeRequestedAt = Date.now();
             usedMessageIds = new Set();
             await saveData('usedMessageIds', []);
             await saveData('codeRequestedAt', codeRequestedAt);
-            await saveData('currentInbox', inbox);
-            showNotification(`Inbox: ${emailToUse}`, 'success', 6000);
+            await saveData('currentInbox', relayInbox);
+            await saveData('currentEmail', emailToUse);
         } else {
             const saved = await getData('currentInbox');
-            if (!saved) { showNotification('Нет сохранённого inbox', 'error'); return; }
+            if (!saved) { showNotification('Нет сохранённой почты', 'error'); return; }
             currentInbox = saved;
-            emailToUse = saved.email;
+            emailToUse = (await getData('currentEmail')) || saved.email;
             codeRequestedAt = await getData('codeRequestedAt');
         }
 
@@ -954,7 +1026,7 @@
         if (codeRequestedAt == null) codeRequestedAt = await getData('codeRequestedAt');
         if (!currentInbox) currentInbox = await getData('currentInbox');
         if (!currentInbox || !currentInbox.inboxId) {
-            showNotification('Нет inbox для проверки', 'error'); pollingActive = false; return;
+            showNotification('Нет ящика для проверки', 'error'); pollingActive = false; return;
         }
 
         for (let i = 0; i < CONFIG.maxAttempts; i++) {
@@ -982,7 +1054,7 @@
             else if (result.reason === 'api_error' && attempt === 2)
                 showNotification('Ошибка API AgentMail', 'error', 6000);
             else if (result.reason === 'no_messages' && attempt === 5)
-                showNotification('Inbox пуст', 'warning', 5000);
+                showNotification('Ящик пуст', 'warning', 5000);
             await new Promise(r => setTimeout(r, CONFIG.checkInterval));
         }
         pollingActive = false;
@@ -1008,6 +1080,13 @@
             await saveData('complete', true);
             showNotification('Регистрация завершена!', 'success', 8000);
             setRegisterButtonLabel('Готово', 'running');
+
+            // Удаляем временный ящик (кроме режима SimpleLogin — там нужен relay)
+            if (CONFIG.deleteInboxAfterUse && CONFIG.emailMode !== 'simplelogin' && currentInbox?.inboxId) {
+                const deleted = await deleteAgentMailInbox(currentInbox.inboxId);
+                if (deleted) showNotification('Временный ящик удалён', 'info', 3000);
+            }
+
             stopUrlWatcher();
             if (window.urlCheckInterval) { clearInterval(window.urlCheckInterval); window.urlCheckInterval = null; }
         }
@@ -1045,9 +1124,10 @@
         initDone = true;
         injectThemeStyles();
 
-        // Загружаем сохранённый ключ
         const savedKey = await getData('agentMailApiKey');
         if (savedKey) CONFIG.agentMailApiKey = savedKey;
+        CONFIG.simpleLoginApiKey = (await getData('simpleLoginApiKey')) || '';
+        CONFIG.emailMode = (await getData('emailMode')) || 'agentmail';
 
         codeRequestedAt = await getData('codeRequestedAt');
         ((await getData('usedMessageIds')) || []).forEach(id => usedMessageIds.add(id));
