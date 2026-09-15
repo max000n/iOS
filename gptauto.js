@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Auto Register (AgentMail + SimpleLogin)
 // @namespace    http://tampermonkey.net/
-// @version      64.0
-// @description  Авторегистрация ChatGPT через AgentMail.to (и опционально SimpleLogin) + единое меню
+// @version      65.0
+// @description  Авторегистрация ChatGPT через AgentMail.to + единое меню + авто-переход
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://auth.openai.com/*
@@ -18,20 +18,18 @@
 (function () {
     'use strict';
 
-    // ============================================
-    // CONFIG
-    // ============================================
     const CONFIG = {
         agentMailApiKey: '',
         agentMailBase: 'https://api.agentmail.to/v0',
         simpleLoginApiKey: '',
         simpleLoginBase: 'https://app.simplelogin.io',
-        emailMode: 'agentmail',           // 'agentmail' | 'simplelogin'
+        emailMode: 'agentmail',
         checkInterval: 3000,
         maxAttempts: 120,
         timeToleranceMs: 60000,
         fastMode: true,
         deleteInboxAfterUse: true,
+        maxRetries: 3,
     };
 
     let codeInserted = false, profileFilled = false, registrationComplete = false,
@@ -42,7 +40,7 @@
     let helpModal = null, settingsModal = null, savedContext = null;
 
     // ============================================
-    // CSS: тема и общие стили
+    // CSS
     // ============================================
     function injectThemeStyles() {
         if (document.getElementById('gpt-auto-theme-styles')) return;
@@ -142,6 +140,66 @@
 
     const saveData = async (k, v) => { try { await GM.setValue('chatgpt_helper_' + k, v); return true; } catch { return false; } };
     const getData  = async (k)    => { try { return await GM.getValue('chatgpt_helper_' + k, null); } catch { return null; } };
+
+    // ============================================
+    // HTTP-ХЕЛПЕР С РЕТРАЯМИ И 429
+    // ============================================
+    function httpRequest(opts) {
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                ...opts,
+                onload: (resp) => resolve(resp),
+                onerror: (e) => resolve({ status: 0, responseText: '', error: e }),
+                ontimeout: () => resolve({ status: 0, responseText: 'timeout' })
+            });
+        });
+    }
+
+    async function httpRequestWithRetry(opts, label = 'API') {
+        for (let attempt = 1; attempt <= CONFIG.maxRetries; attempt++) {
+            const resp = await httpRequest(opts);
+
+            // 429 — читаем Retry-After и ждём
+            if (resp.status === 429) {
+                let wait = 5;
+                const m = (resp.responseHeaders || '').match(/retry-after:\s*(\d+)/i);
+                if (m) wait = parseInt(m[1]) || 5;
+                if (attempt < CONFIG.maxRetries) {
+                    showNotification(`${label}: лимит запросов, ждём ${wait}с… (попытка ${attempt}/${CONFIG.maxRetries})`, 'warning', wait * 1000 + 1000);
+                    await new Promise(r => setTimeout(r, wait * 1000));
+                    continue;
+                }
+                showNotification(`${label}: 429 — превышен лимит запросов`, 'error', 12000);
+                return resp;
+            }
+
+            // 5xx — ретраим с задержкой
+            if (resp.status >= 500 && resp.status < 600) {
+                if (attempt < CONFIG.maxRetries) {
+                    const wait = 2 * attempt;
+                    showNotification(`${label}: ошибка ${resp.status}, повтор через ${wait}с…`, 'warning', wait * 1000 + 1000);
+                    await new Promise(r => setTimeout(r, wait * 1000));
+                    continue;
+                }
+                showNotification(`${label}: ${resp.status} — сервер недоступен`, 'error', 12000);
+                return resp;
+            }
+
+            // 0 — сетевая ошибка
+            if (resp.status === 0) {
+                if (attempt < CONFIG.maxRetries) {
+                    showNotification(`${label}: сетевая ошибка, повтор…`, 'warning', 3000);
+                    await new Promise(r => setTimeout(r, 2000));
+                    continue;
+                }
+                showNotification(`${label}: сеть недоступна`, 'error', 10000);
+                return resp;
+            }
+
+            return resp;
+        }
+        return { status: 0, responseText: 'max_retries' };
+    }
 
     // ============================================
     // УВЕДОМЛЕНИЯ
@@ -279,126 +337,96 @@
                Date.now().toString(36);
     }
 
-    function createAgentMailInbox() {
-        return new Promise((resolve) => {
-            if (!CONFIG.agentMailApiKey) { showNotification('AgentMail: ключ не задан', 'error'); resolve(null); return; }
-            const username = generateInboxUsername();
-            GM_xmlhttpRequest({
-                method: 'POST',
-                url: `${CONFIG.agentMailBase}/inboxes`,
-                headers: {
-                    'Authorization': `Bearer ${CONFIG.agentMailApiKey}`,
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                },
-                data: JSON.stringify({ username, displayName: 'ChatGPT Auto' }),
-                onload: (resp) => {
-                    if (resp.status !== 200 && resp.status !== 201) {
-                        showNotification(`AgentMail: ${resp.status} ${resp.responseText.slice(0, 150)}`, 'error', 12000);
-                        resolve(null); return;
-                    }
-                    try {
-                        const d = JSON.parse(resp.responseText);
-                        resolve({ inboxId: d.inbox_id, email: d.inbox_id || d.email, username });
-                    } catch { resolve(null); }
-                },
-                onerror: () => { showNotification('AgentMail: сетевая ошибка', 'error'); resolve(null); },
-                ontimeout: () => { showNotification('AgentMail: таймаут', 'error'); resolve(null); }
-            });
-        });
+    async function createAgentMailInbox() {
+        if (!CONFIG.agentMailApiKey) { showNotification('AgentMail: ключ не задан', 'error'); return null; }
+        const username = generateInboxUsername();
+        const resp = await httpRequestWithRetry({
+            method: 'POST',
+            url: `${CONFIG.agentMailBase}/inboxes`,
+            headers: {
+                'Authorization': `Bearer ${CONFIG.agentMailApiKey}`,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            data: JSON.stringify({ username, displayName: 'ChatGPT Auto' })
+        }, 'AgentMail');
+
+        if (resp.status !== 200 && resp.status !== 201) {
+            showNotification(`AgentMail: ${resp.status} ${resp.responseText.slice(0, 150)}`, 'error', 12000);
+            return null;
+        }
+        try {
+            const d = JSON.parse(resp.responseText);
+            return { inboxId: d.inbox_id, email: d.inbox_id || d.email, username };
+        } catch { return null; }
     }
 
-    function deleteAgentMailInbox(inboxId) {
-        return new Promise((resolve) => {
-            if (!inboxId) { resolve(false); return; }
-            GM_xmlhttpRequest({
-                method: 'DELETE',
-                url: `${CONFIG.agentMailBase}/inboxes/${encodeURIComponent(inboxId)}`,
-                headers: { 'Authorization': `Bearer ${CONFIG.agentMailApiKey}` },
-                onload: (r) => resolve(r.status === 200 || r.status === 204),
-                onerror: () => resolve(false),
-                ontimeout: () => resolve(false)
-            });
-        });
+    async function deleteAgentMailInbox(inboxId) {
+        if (!inboxId) return false;
+        const resp = await httpRequestWithRetry({
+            method: 'DELETE',
+            url: `${CONFIG.agentMailBase}/inboxes/${encodeURIComponent(inboxId)}`,
+            headers: { 'Authorization': `Bearer ${CONFIG.agentMailApiKey}` }
+        }, 'AgentMail delete');
+        return resp.status === 200 || resp.status === 204;
     }
 
-    function listAgentMailInboxes() {
-        return new Promise((resolve) => {
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: `${CONFIG.agentMailBase}/inboxes`,
-                headers: { 'Authorization': `Bearer ${CONFIG.agentMailApiKey}`, 'Accept': 'application/json' },
-                onload: (r) => {
-                    if (r.status !== 200) { resolve([]); return; }
-                    try { resolve(JSON.parse(r.responseText).inboxes || []); } catch { resolve([]); }
-                },
-                onerror: () => resolve([]),
-                ontimeout: () => resolve([])
-            });
-        });
+    async function listAgentMailInboxes() {
+        const resp = await httpRequestWithRetry({
+            method: 'GET',
+            url: `${CONFIG.agentMailBase}/inboxes`,
+            headers: { 'Authorization': `Bearer ${CONFIG.agentMailApiKey}`, 'Accept': 'application/json' }
+        }, 'AgentMail list');
+        if (resp.status !== 200) return [];
+        try { return JSON.parse(resp.responseText).inboxes || []; } catch { return []; }
     }
 
-    function listAgentMailMessages(inboxId) {
-        return new Promise((resolve) => {
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: `${CONFIG.agentMailBase}/inboxes/${encodeURIComponent(inboxId)}/messages?limit=10`,
-                headers: { 'Authorization': `Bearer ${CONFIG.agentMailApiKey}`, 'Accept': 'application/json' },
-                onload: (r) => {
-                    if (r.status !== 200) { resolve(null); return; }
-                    try { resolve(JSON.parse(r.responseText).messages || []); } catch { resolve(null); }
-                },
-                onerror: () => resolve(null),
-                ontimeout: () => resolve(null)
-            });
+    async function listAgentMailMessages(inboxId) {
+        const resp = await httpRequest({
+            method: 'GET',
+            url: `${CONFIG.agentMailBase}/inboxes/${encodeURIComponent(inboxId)}/messages?limit=10`,
+            headers: { 'Authorization': `Bearer ${CONFIG.agentMailApiKey}`, 'Accept': 'application/json' }
         });
+        // Для чтения писем — без ретраев, просто мягкая обработка
+        if (resp.status === 429) return { __rateLimited: true };
+        if (resp.status !== 200) return null;
+        try { return JSON.parse(resp.responseText).messages || []; } catch { return null; }
     }
 
-    function getAgentMailMessage(inboxId, messageId) {
-        return new Promise((resolve) => {
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: `${CONFIG.agentMailBase}/inboxes/${encodeURIComponent(inboxId)}/messages/${encodeURIComponent(messageId)}`,
-                headers: { 'Authorization': `Bearer ${CONFIG.agentMailApiKey}`, 'Accept': 'application/json' },
-                onload: (r) => {
-                    if (r.status !== 200) { resolve(null); return; }
-                    try { resolve(JSON.parse(r.responseText)); } catch { resolve(null); }
-                },
-                onerror: () => resolve(null),
-                ontimeout: () => resolve(null)
-            });
+    async function getAgentMailMessage(inboxId, messageId) {
+        const resp = await httpRequest({
+            method: 'GET',
+            url: `${CONFIG.agentMailBase}/inboxes/${encodeURIComponent(inboxId)}/messages/${encodeURIComponent(messageId)}`,
+            headers: { 'Authorization': `Bearer ${CONFIG.agentMailApiKey}`, 'Accept': 'application/json' }
         });
+        if (resp.status !== 200) return null;
+        try { return JSON.parse(resp.responseText); } catch { return null; }
     }
 
     // ============================================
     // SIMPLELOGIN API
     // ============================================
-    function createSimpleLoginAlias() {
-        return new Promise((resolve) => {
-            if (!CONFIG.simpleLoginApiKey) { showNotification('SimpleLogin: ключ не задан', 'error'); resolve(null); return; }
-            GM_xmlhttpRequest({
-                method: 'POST',
-                url: `${CONFIG.simpleLoginBase}/api/alias/random/new`,
-                headers: {
-                    'Authentication': CONFIG.simpleLoginApiKey,
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                },
-                data: JSON.stringify({ note: 'ChatGPT Auto' }),
-                onload: (r) => {
-                    if (r.status !== 200 && r.status !== 201) {
-                        showNotification(`SimpleLogin: ${r.status} ${r.responseText.slice(0, 150)}`, 'error', 12000);
-                        resolve(null); return;
-                    }
-                    try {
-                        const d = JSON.parse(r.responseText);
-                        resolve(d.alias || d.email);
-                    } catch { resolve(null); }
-                },
-                onerror: () => { showNotification('SimpleLogin: сетевая ошибка', 'error'); resolve(null); },
-                ontimeout: () => { showNotification('SimpleLogin: таймаут', 'error'); resolve(null); }
-            });
-        });
+    async function createSimpleLoginAlias() {
+        if (!CONFIG.simpleLoginApiKey) { showNotification('SimpleLogin: ключ не задан', 'error'); return null; }
+        const resp = await httpRequestWithRetry({
+            method: 'POST',
+            url: `${CONFIG.simpleLoginBase}/api/alias/random/new`,
+            headers: {
+                'Authentication': CONFIG.simpleLoginApiKey,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            data: JSON.stringify({ note: 'ChatGPT Auto' })
+        }, 'SimpleLogin');
+
+        if (resp.status !== 200 && resp.status !== 201) {
+            showNotification(`SimpleLogin: ${resp.status} ${resp.responseText.slice(0, 150)}`, 'error', 12000);
+            return null;
+        }
+        try {
+            const d = JSON.parse(resp.responseText);
+            return d.alias || d.email;
+        } catch { return null; }
     }
 
     // ============================================
@@ -419,6 +447,7 @@
     async function findVerificationCode() {
         if (!currentInbox?.inboxId) return { found: false, reason: 'no_inbox' };
         const messages = await listAgentMailMessages(currentInbox.inboxId);
+        if (messages?.__rateLimited) return { found: false, reason: 'rate_limited' };
         if (!messages) return { found: false, reason: 'api_error' };
         if (!messages.length) return { found: false, reason: 'no_messages' };
 
@@ -526,9 +555,6 @@
         return false;
     }
 
-    // ============================================
-    // ПРОВЕРКИ СОСТОЯНИЯ
-    // ============================================
     function isUserLoggedIn() {
         if (document.querySelector('[data-testid="user-menu"], .user-menu')) return true;
         if (window.location.href.includes('/c/')) return true;
@@ -543,6 +569,7 @@
 
     const isOnLoginPage = () => window.location.hostname.includes('auth.openai.com') || findEmailInput() !== null;
     const isOnProfilePage = () => { const f = findProfileFields(); return !!(f.nameInput && f.ageInput); };
+    const isOnAboutYouPage = () => /about-you|profile|onboarding/i.test(window.location.href);
 
     // ============================================
     // ДИАЛОГ ВЫБОРА
@@ -591,78 +618,31 @@
                 <button id="closeHelp" style="background:none;border:none;font-size:24px;cursor:pointer;color:var(--gpt-fg-muted);padding:0 5px;">×</button>
             </div>
             <div style="color:var(--gpt-fg);line-height:1.6;font-size:14px;">
-
                 <div style="margin-bottom:22px;">
                     <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">🔑 Шаг 1. Получение ключей</h3>
-                    <p style="margin:0 0 10px 0;"><b>AgentMail (обязательно):</b></p>
-                    <ol style="margin:0 0 12px 20px;">
-                        <li>Откройте <b>console.agentmail.to</b> и войдите.</li>
-                        <li>Раздел <b>API Keys</b> → <b>Create New API Key</b>.</li>
-                        <li>Скопируйте ключ (начинается с <code>am_</code>).</li>
-                    </ol>
-                    <p style="margin:0 0 10px 0;"><b>SimpleLogin (только для режима «SimpleLogin»):</b></p>
-                    <ol style="margin:0 0 0 20px;">
-                        <li>Откройте <b>app.simplelogin.io/dashboard/api_key</b>.</li>
-                        <li>Нажмите <b>Create</b>, скопируйте ключ.</li>
-                    </ol>
+                    <p style="margin:0 0 10px 0;"><b>AgentMail (обязательно):</b> console.agentmail.to → API Keys → Create New API Key</p>
+                    <p style="margin:0;"><b>SimpleLogin (опционально):</b> app.simplelogin.io/dashboard/api_key → Create</p>
                 </div>
-
                 <div style="margin-bottom:22px;">
-                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">⚙️ Шаг 2. Настройка скрипта</h3>
-                    <ol style="margin:0;padding-left:20px;">
-                        <li>Откройте <b>☰ → Настройки</b> на странице ChatGPT.</li>
-                        <li>Выберите режим: <b>AgentMail</b> или <b>SimpleLogin</b>.</li>
-                        <li>Вставьте ключи и нажмите <b>Сохранить</b>.</li>
-                    </ol>
+                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">⚙️ Шаг 2. Настройка</h3>
+                    <p style="margin:0;">☰ → Настройки → выберите режим → вставьте ключи → Сохранить.</p>
                 </div>
-
                 <div style="margin-bottom:22px;">
-                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">📧 Режим SimpleLogin: подготовка AgentMail вручную</h3>
-                    <p style="margin:0 0 10px 0;color:var(--gpt-fg-muted);">
-                        В этом режиме регистрация идёт через алиас SimpleLogin, но письма принимает постоянный ящик AgentMail.
-                    </p>
+                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">📧 Режим SimpleLogin</h3>
                     <ol style="margin:0;padding-left:20px;">
-                        <li>Войдите в <b>console.agentmail.to</b>.</li>
-                        <li>Создайте <b>постоянный</b> inbox (например, <code>chatgpt-relay</code>).</li>
-                        <li>В <b>app.simplelogin.io → Mailboxes</b> нажмите <b>Add Mailbox</b>.</li>
-                        <li>Введите адрес этого AgentMail-ящика и подтвердите письмо.</li>
-                        <li>Сделайте его <b>дефолтным</b>.</li>
+                        <li>Создайте постоянный inbox в AgentMail (не удаляйте его).</li>
+                        <li>В SimpleLogin → Mailboxes → Add Mailbox → укажите адрес AgentMail.</li>
+                        <li>Подтвердите письмо, сделайте дефолтным.</li>
                     </ol>
-                    <p style="margin:10px 0 0 0;color:var(--gpt-fg-muted);font-size:13px;">
-                        ⚠️ Не удаляйте этот inbox — иначе алиасы перестанут работать.
-                    </p>
                 </div>
-
                 <div style="margin-bottom:22px;">
                     <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">🚀 Шаг 3. Регистрация</h3>
-                    <ol style="margin:0;padding-left:20px;">
-                        <li>Откройте <b>chatgpt.com</b> (не авторизованы).</li>
-                        <li>Нажмите <b>☰ → Регистрация</b>.</li>
-                        <li>Выберите <b>«Новая регистрация»</b>.</li>
-                        <li>Скрипт сам: создаст почту → введёт email → дождётся кода → вставит код → заполнит профиль.</li>
-                        <li>Временный ящик удалится автоматически (кроме SimpleLogin).</li>
-                    </ol>
+                    <p style="margin:0;">chatgpt.com → ☰ → Регистрация → «Новая регистрация».</p>
                 </div>
-
-                <div style="margin-bottom:22px;">
-                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">📋 Шаг 4. Перенос контекста</h3>
-                    <ol style="margin:0;padding-left:20px;">
-                        <li>В старом аккаунте: <b>☰ → Копировать контекст</b>.</li>
-                        <li>Выйдите из аккаунта.</li>
-                        <li>Зарегистрируйте новый через <b>☰ → Регистрация</b>.</li>
-                        <li>В новом чате: <b>☰ → Вставить контекст</b>.</li>
-                    </ol>
-                </div>
-
                 <div>
-                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">⚙️ Управление ключами</h3>
-                    <ul style="margin:0;padding-left:20px;">
-                        <li><b>Изменить:</b> ☰ → Настройки → новые ключи → Сохранить.</li>
-                        <li><b>Удалить:</b> ☰ → Настройки → «Удалить ключи».</li>
-                        <li><b>Вручную:</b> Tampermonkey Dashboard → ваш скрипт → Storage.</li>
-                    </ul>
+                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">📋 Перенос контекста</h3>
+                    <p style="margin:0;">☰ → Копировать контекст → выход → новая регистрация → ☰ → Вставить контекст.</p>
                 </div>
-
             </div>
         `;
         helpModal.appendChild(modal);
@@ -672,7 +652,7 @@
     }
 
     // ============================================
-    // МЕНЮ (объединённое, слева)
+    // МЕНЮ
     // ============================================
     let menuButton = null, menuPanel = null, menuVisible = false;
     let statusLabel = null;
@@ -823,7 +803,6 @@
         document.body.appendChild(menuButton);
         document.body.appendChild(menuPanel);
 
-        // Закрытие по клику вне
         document.addEventListener('click', (e) => {
             if (menuPanel && menuPanel.style.display === 'flex' &&
                 !menuPanel.contains(e.target) && !menuButton.contains(e.target)) {
@@ -884,10 +863,9 @@
             setMenuStatus('Создаю почту…', '#10a37f');
 
             if (CONFIG.emailMode === 'simplelogin') {
-                // Берём постоянный inbox (тот, что привязан в SimpleLogin)
                 const inboxes = await listAgentMailInboxes();
                 if (!inboxes.length) {
-                    showNotification('AgentMail: нет ни одного постоянного inbox. Создайте его вручную.', 'error', 12000);
+                    showNotification('AgentMail: нет ни одного inbox. Создайте вручную.', 'error', 12000);
                     setMenuStatus('', '');
                     return;
                 }
@@ -918,7 +896,7 @@
             if (!saved) { showNotification('Нет сохранённой почты', 'error'); return; }
             currentInbox = saved;
             emailToUse = (await getData('currentEmail')) || saved.email;
-            codeRequestedAt = await getData('codeRequestedAt');
+            codeRequestedAt = await getData('codeRequestedAt') || Date.now();
         }
 
         let input = null;
@@ -935,48 +913,79 @@
         startUrlWatcher(() => { if (!registrationComplete) runStage(); }, 12000);
     }
 
+    // ⚡ ИСПРАВЛЕНО: явный вызов runStage() после смены состояния
     async function watchCodeResult() {
         const start = Date.now();
+        let lastCheck = 0;
+
         while (Date.now() - start < 90000) {
-            await new Promise(r => setTimeout(r, 2000));
+            await new Promise(r => setTimeout(r, 1500));
             if (registrationComplete) return;
 
-            // Если появились поля профиля — сразу идём дальше
+            // 1. Появились поля профиля
             if (isOnProfilePage()) {
-                setTimeout(runStage, 400);
+                showNotification('Код принят. Заполняю профиль…', 'success', 4000);
+                if (!isRunning) runStage();
                 return;
             }
-            // Если поле кода пропало — тоже идём дальше
-            if (!findCodeInputs()) {
-                setTimeout(runStage, 600);
+
+            // 2. URL сменился на /about-you
+            if (isOnAboutYouPage()) {
+                showNotification('Код принят. Переход к профилю…', 'success', 4000);
+                if (!isRunning) runStage();
                 return;
+            }
+
+            // 3. Поле ввода кода исчезло (но не из-за ошибки)
+            if (!findCodeInputs()) {
+                // Небольшая пауза, чтобы DOM успел стабилизироваться
+                await new Promise(r => setTimeout(r, 800));
+                if (!findCodeInputs()) {
+                    if (!isRunning) runStage();
+                    return;
+                }
+            }
+
+            // Периодическое напоминание пользователю
+            if (Date.now() - lastCheck > 10000) {
+                lastCheck = Date.now();
+                showNotification('Ждём подтверждения кода…', 'info', 2500);
             }
         }
+
         showNotification('Код не подошёл. Нажмите «Resend code» — поймаю новое письмо.', 'warning', 12000);
         codeInserted = false; verifyCompleted = false;
-        setTimeout(runStage, 1000);
+        if (!isRunning) runStage();
     }
 
+    // ⚡ ИСПРАВЛЕНО: уведомления о каждой попытке + 429
     async function stageVerify() {
         if (verifyCompleted || registrationComplete || pollingActive) return;
         if (codeInserted) { verifyCompleted = true; await stageProfile(); return; }
         pollingActive = true;
-        if (codeRequestedAt == null) codeRequestedAt = await getData('codeRequestedAt');
+
+        if (codeRequestedAt == null) codeRequestedAt = await getData('codeRequestedAt') || Date.now();
         if (!currentInbox) currentInbox = await getData('currentInbox');
         if (!currentInbox?.inboxId) {
             showNotification('Нет ящика для проверки', 'error');
             pollingActive = false; return;
         }
 
+        showNotification(`Начинаю проверку почты (${currentInbox.email})`, 'info', 4000);
+
         for (let i = 0; i < CONFIG.maxAttempts; i++) {
             const attempt = i + 1;
-            if (attempt <= 3 || attempt % 10 === 0)
+
+            // ⚡ Уведомление о каждой проверке (как в оригинале)
+            if (attempt <= 3 || attempt % 5 === 0) {
+                showNotification(`Проверка почты #${attempt}/${CONFIG.maxAttempts}`, 'debug', 2000);
                 setMenuStatus(`Проверка #${attempt}`, '#10a37f');
+            }
 
             const result = await findVerificationCode();
 
             if (result.found && result.code) {
-                showNotification(`Код: ${result.code} (письму ${result.ageSec}с)`, 'success', 8000);
+                showNotification(`Код найден: ${result.code} (письму ${result.ageSec}с)`, 'success', 8000);
                 setMenuStatus('Ввожу код…', '#10a37f');
 
                 if (await fillCode(result.code)) {
@@ -986,8 +995,8 @@
                     await humanDelay(200, 500);
                     await clickContinue();
 
-                    // ⚡ Авто-переход к следующему этапу
-                    startUrlWatcher(() => { if (!registrationComplete) runStage(); }, 20000);
+                    // Запускаем отслеживание следующего состояния
+                    startUrlWatcher(() => { if (!registrationComplete) runStage(); }, 25000);
                     watchCodeResult();
                     break;
                 } else {
@@ -996,15 +1005,28 @@
                 }
             }
 
-            if (result.reason === 'waiting_new_email' && (attempt === 1 || attempt % 6 === 0))
-                showNotification(`Ждём письмо (старых: ${result.count})`, 'info', 2000);
-            else if (result.reason === 'api_error' && attempt === 2)
-                showNotification('Ошибка API AgentMail', 'error', 6000);
-            else if (result.reason === 'no_messages' && attempt === 5)
-                showNotification('Ящик пуст', 'warning', 5000);
+            // Обработка статусов
+            if (result.reason === 'waiting_new_email') {
+                if (attempt === 1 || attempt % 6 === 0)
+                    showNotification(`Ждём новое письмо (старых: ${result.count})`, 'info', 3000);
+            } else if (result.reason === 'rate_limited') {
+                showNotification('AgentMail: лимит запросов, пауза 10с…', 'warning', 11000);
+                await new Promise(r => setTimeout(r, 10000));
+                continue;
+            } else if (result.reason === 'api_error') {
+                if (attempt === 2 || attempt % 10 === 0)
+                    showNotification('AgentMail: ошибка API, повтор…', 'error', 5000);
+            } else if (result.reason === 'no_messages') {
+                if (attempt === 5)
+                    showNotification('Ящик пуст, ждём письмо от OpenAI…', 'warning', 5000);
+            } else if (result.reason === 'no_code_in_fresh') {
+                if (attempt % 6 === 0)
+                    showNotification('Письмо есть, но кода нет — ждём следующее', 'warning', 3000);
+            }
 
             await new Promise(r => setTimeout(r, CONFIG.checkInterval));
         }
+
         pollingActive = false;
         setTimeout(() => { if (!registrationComplete) runStage(); }, 1000);
     }
@@ -1040,7 +1062,7 @@
 
     function detectStage() {
         if (hasLoginButton() && window.location.hostname.includes('chatgpt.com')) return 'main';
-        if (window.location.hostname.includes('auth.openai.com')) {
+        if (window.location.hostname.includes('auth.openai.com') || isOnAboutYouPage()) {
             if (isOnProfilePage()) return 'profile';
             if (findCodeInputs()) return 'verify';
             if (findEmailInput()) return 'login';
@@ -1106,7 +1128,6 @@
 
         createMenu();
 
-        // Обновление состояния меню при смене URL
         let lastUrl = window.location.href;
         window.urlCheckInterval = setInterval(() => {
             if (window.location.href !== lastUrl) {
