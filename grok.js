@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      83.8
-// @description  Авторегистрация Grok + копирование/вставка контекста
+// @version      84.0
+// @description  Авторегистрация Grok + копирование/вставка контекста + удаление алиасов
 // @author       You
 // @match        https://accounts.x.ai/*
 // @match        https://grok.com/*
@@ -23,7 +23,7 @@
 const C = {
     amKey: '', amBase: 'https://api.agentmail.to/v0',
     slKey: '', slBase: 'https://app.simplelogin.io',
-    slRelay: '', slDomain: '', slPrefix: '',
+    slRelay: '', slDomain: '', slPrefix: '', slAlias: '',
     mode: 'agentmail',
     interval: 3000, maxTries: 120, tolMs: 60000,
     fast: true, retries: 3,
@@ -41,6 +41,9 @@ const GS = {
     consecutiveNoCode: 0,
     lastError: null,
     forceNewInbox: false,
+    // SimpleLogin alias, созданный в текущем сеансе
+    slAliasId: null,
+    slAliasEmail: null,
 };
 
 let inited = false,
@@ -93,32 +96,20 @@ addEventListener('unhandledrejection', e => logError('promise', e.reason?.messag
 
 // ═══════════════════ STORAGE ═══════════════════
 async function save(k, v) {
-    try {
-        await GM.setValue('cg_' + k, v);
-        return true;
-    } catch (e) {
-        logError('save', k + ': ' + (e.message || e));
-        return false;
-    }
+    try { await GM.setValue('cg_' + k, v); return true; }
+    catch (e) { logError('save', k + ': ' + (e.message || e)); return false; }
 }
-
 async function load(k) {
-    try {
-        const v = await GM.getValue('cg_' + k, null);
-        return v;
-    } catch (e) {
-        logError('load', k + ': ' + (e.message || e));
-        return null;
-    }
+    try { return await GM.getValue('cg_' + k, null); }
+    catch (e) { logError('load', k + ': ' + (e.message || e)); return null; }
 }
-
-// Загрузить ВСЕ ключи в C.xxx — вызывается при старте и перед открытием настроек
 async function loadKeys() {
     C.amKey = (await load('amKey')) || '';
     C.slKey = (await load('slKey')) || '';
     C.slRelay = (await load('slRelay')) || '';
     C.slDomain = (await load('slDomain')) || '';
     C.slPrefix = (await load('slPrefix')) || '';
+    C.slAlias = (await load('slAlias')) || '';
     C.mode = (await load('mode')) || 'agentmail';
     const dbg = await load('debug');
     if (dbg === true) C.debug = true;
@@ -126,7 +117,8 @@ async function loadKeys() {
         ' am=' + (C.amKey ? 'да' : 'нет') +
         ' sl=' + (C.slKey ? 'да' : 'нет') +
         ' relay=' + (C.slRelay || '—') +
-        ' domain=' + (C.slDomain || '—'));
+        ' domain=' + (C.slDomain || '—') +
+        ' alias=' + (C.slAlias || '—'));
 }
 
 // ═══════════════════ ДАМП DOM ═══════════════════
@@ -191,7 +183,7 @@ async function buildReport() {
     const p = [];
     p.push('═══ GROK AUTO REGISTER — ОТЧЁТ ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия: 83.8');
+    p.push('Версия: 84.0');
     p.push('URL: ' + location.href);
     p.push('Хост: ' + location.hostname);
     p.push('Сайт: ' + (isAccounts() ? 'accounts.x.ai' : isGrokChat() ? 'grok.com (только меню)' : 'неизвестный'));
@@ -217,9 +209,12 @@ async function buildReport() {
     p.push('GS.inbox: ' + JSON.stringify(GS.inbox));
     p.push('GS.codeReqAt: ' + (GS.codeReqAt ? new Date(GS.codeReqAt).toISOString() : null));
     p.push('GS.usedIds.size: ' + GS.usedIds.size);
+    p.push('GS.slAliasId: ' + (GS.slAliasId || '—'));
+    p.push('GS.slAliasEmail: ' + (GS.slAliasEmail || '—'));
     p.push('');
     p.push('─── КОНФИГ ───');
     p.push('mode: ' + C.mode + ' | slDomain: ' + (C.slDomain || '—') + ' | slPrefix: ' + (C.slPrefix || '—') + ' | slRelay: ' + (C.slRelay || '—'));
+    p.push('slAlias: ' + (C.slAlias || '—'));
     p.push('amKey: ' + (C.amKey ? 'да' : 'нет') + ' | slKey: ' + (C.slKey ? 'да' : 'нет'));
     p.push('debug: ' + C.debug);
     p.push('');
@@ -395,7 +390,6 @@ async function focusEl(el) {
     } catch {}
     await delay(50, 150);
 }
-
 async function typeHuman(el, txt) {
     if (!el) return;
     await focusEl(el);
@@ -464,10 +458,7 @@ function notify(text, type = 'info', dur = 5000) {
 
 // ═══════════════════ SIMPLELOGIN: ДОМЕНЫ ═══════════════════
 async function loadSimpleLoginDomains(selectEl, btnEl) {
-    if (!C.slKey) {
-        notify('Сначала укажите SimpleLogin API Key', 'warn', 4000);
-        return;
-    }
+    if (!C.slKey) { notify('Сначала укажите SimpleLogin API Key', 'warn', 4000); return; }
     btnEl.disabled = true;
     btnEl.textContent = 'Загрузка…';
     try {
@@ -476,10 +467,7 @@ async function loadSimpleLoginDomains(selectEl, btnEl) {
             url: `${C.slBase}/api/v5/alias/options`,
             headers: { Authentication: C.slKey, Accept: 'application/json' },
         }, 'SimpleLogin');
-        if (r.status !== 200) {
-            notify(`SimpleLogin: ${r.status} — не удалось загрузить домены`, 'err', 8000);
-            return;
-        }
+        if (r.status !== 200) { notify(`SimpleLogin: ${r.status} — не удалось загрузить домены`, 'err', 8000); return; }
         let data;
         try { data = JSON.parse(r.responseText); } catch { notify('SimpleLogin: некорректный ответ', 'err', 6000); return; }
         const suffixes = Array.isArray(data.suffixes) ? data.suffixes : [];
@@ -521,9 +509,31 @@ async function loadSimpleLoginDomains(selectEl, btnEl) {
     }
 }
 
+// ═══════════════════ SIMPLELOGIN: УДАЛЕНИЕ АЛИАСА ═══════════════════
+async function deleteSimpleLoginAlias(aliasId) {
+    if (!aliasId) return false;
+    if (!C.slKey) return false;
+    logAlways('slDelete', 'удаляю алиас id=' + aliasId);
+    const r = await req({
+        method: 'DELETE',
+        url: `${C.slBase}/api/aliases/${aliasId}`,
+        headers: { Authentication: C.slKey, Accept: 'application/json' },
+    });
+    if (r.status === 200 || r.status === 204) {
+        logAlways('slDelete', 'успешно удалён id=' + aliasId);
+        return true;
+    }
+    // Иногда SimpleLogin использует 404 если уже удалён — считаем успехом
+    if (r.status === 404) {
+        logAlways('slDelete', 'алиас уже удалён id=' + aliasId);
+        return true;
+    }
+    logError('slDelete', `не удалось удалить id=${aliasId} status=${r.status} body=${(r.responseText||'').slice(0,120)}`);
+    return false;
+}
+
 // ═══════════════════ НАСТРОЙКИ ═══════════════════
 async function openSettings() {
-    // ВАЖНО: всегда подтягиваем актуальные ключи из storage, чтобы поля не были пустыми
     await loadKeys();
 
     return new Promise(res => {
@@ -566,10 +576,14 @@ async function openSettings() {
 </select>
 <button type="button" id="slload" style="padding:0 16px;border-radius:12px;border:1px solid var(--gbd);background:var(--gelev);color:var(--gfg);cursor:pointer;font-family:inherit;font-size:13px;white-space:nowrap">Загрузить домены</button>
 </div>
-<p class="grok-hint">Список подгружается из SimpleLogin API. Только бесплатные домены.</p>
+<div style="height:12px"></div>
+<label class="grok-lbl">Готовый SimpleLogin alias (опционально)</label>
+<input id="slalias" class="grok-in" type="email" placeholder="например: myalias@slmail.me" autocomplete="off">
+<p class="grok-hint">Если указан — скрипт возьмёт его напрямую (без API). <b>Не удаляется автоматически</b> после регистрации (это ваш алиас).</p>
 <div style="height:12px"></div>
 <label class="grok-lbl">Префикс алиаса (опционально)</label>
 <input id="slprefix" class="grok-in" type="text" placeholder="оставьте пустым" autocomplete="off">
+<p class="grok-hint">Авто-созданные алиасы удаляются после успешной регистрации.</p>
 </div>
 </div>
 <div id="pane-diag" style="display:none;overflow-y:auto;max-height:65vh;padding-right:4px">
@@ -590,7 +604,8 @@ GS.emailDone: ${GS.emailDone}
 GS.codeDone: ${GS.codeDone}
 GS.profileDone: ${GS.profileDone}
 GS.attempts: ${GS.attempts}
-GS.consecutiveNoCode: ${GS.consecutiveNoCode}</div>
+GS.consecutiveNoCode: ${GS.consecutiveNoCode}
+GS.slAliasId: ${GS.slAliasId || '—'}</div>
 </div>
 <div style="height:16px"></div>
 <div style="display:flex;flex-direction:column;gap:10px">
@@ -607,14 +622,15 @@ GS.consecutiveNoCode: ${GS.consecutiveNoCode}</div>
             paneDiag.style.display = t === 'diag' ? 'block' : 'none';
         });
         const am = d.querySelector('#amin'), sl = d.querySelector('#slin'),
-              sle = d.querySelector('#slemail'), sld = d.querySelector('#sldomain'), slp = d.querySelector('#slprefix'),
+              sle = d.querySelector('#slemail'), sld = d.querySelector('#sldomain'),
+              sla = d.querySelector('#slalias'), slp = d.querySelector('#slprefix'),
               sll = d.querySelector('#slload'), slB = d.querySelector('#slBlock');
 
-        // Заполняем поля из актуальных C.xxx
         if (C.amKey) am.value = C.amKey;
         if (C.slKey) sl.value = C.slKey;
         if (C.slRelay) sle.value = C.slRelay;
         if (C.slPrefix) slp.value = C.slPrefix;
+        if (C.slAlias) sla.value = C.slAlias;
         if (C.slDomain) {
             const opt = document.createElement('option');
             opt.value = C.slDomain;
@@ -649,57 +665,54 @@ GS.consecutiveNoCode: ${GS.consecutiveNoCode}</div>
         d.querySelector('#gcancel').onclick = () => close(null);
         settingsModal.onclick = e => { if (e.target === settingsModal) close(null); };
 
-        // ВАЖНО: сохранение атомарное — сначала валидация, потом запись, потом обновление C.xxx
         d.querySelector('#gsave').onclick = async () => {
             const ak = am.value.trim();
             const sk = sl.value.trim();
             const relay = sle.value.trim();
             const domain = sld.value.trim();
             const prefix = slp.value.trim();
+            const alias = sla.value.trim();
 
-            // Валидация ДО записи
             if (!ak) return notify('Укажите AgentMail API Key', 'err', 4000);
             if (mode === 'simplelogin' && !sk) return notify('Для SimpleLogin укажите API Key', 'err', 5000);
             if (mode === 'simplelogin' && !relay) return notify('Укажите AgentMail relay email для SimpleLogin', 'err', 5000);
+            if (alias && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(alias)) return notify('Alias должен быть email-адресом', 'err', 5000);
 
-            // Запись — фиксируем результат
             const okAm = await save('amKey', ak);
             const okSl = await save('slKey', sk || '');
             const okRelay = await save('slRelay', relay || '');
             const okDomain = await save('slDomain', domain || '');
             const okPrefix = await save('slPrefix', prefix || '');
+            const okAlias = await save('slAlias', alias || '');
             const okMode = await save('mode', mode);
 
-            if (!okAm || !okSl || !okRelay || !okDomain || !okPrefix || !okMode) {
+            if (!okAm || !okSl || !okRelay || !okDomain || !okPrefix || !okAlias || !okMode) {
                 notify('Не все данные сохранились. Попробуйте ещё раз.', 'err', 6000);
                 return;
             }
 
-            // Обновляем C.xxx
-            C.amKey = ak;
-            C.slKey = sk;
-            C.slRelay = relay;
-            C.slDomain = domain;
-            C.slPrefix = prefix;
+            C.amKey = ak; C.slKey = sk; C.slRelay = relay;
+            C.slDomain = domain; C.slPrefix = prefix; C.slAlias = alias;
             C.mode = mode;
 
-            // Контрольная проверка: читаем обратно из storage
             await loadKeys();
 
             notify('Настройки сохранены', 'ok', 3000);
-            logAlways('settings', 'saved and verified: mode=' + C.mode +
+            logAlways('settings', 'saved: mode=' + C.mode +
                 ' am=' + (C.amKey ? 'да' : 'нет') +
                 ' sl=' + (C.slKey ? 'да' : 'нет') +
                 ' relay=' + (C.slRelay || '—') +
-                ' domain=' + (C.slDomain || '—'));
+                ' domain=' + (C.slDomain || '—') +
+                ' alias=' + (C.slAlias || '—'));
             close(true);
         };
 
         d.querySelector('#gclr').onclick = async () => {
             await save('amKey', ''); await save('slKey', ''); await save('slRelay', '');
-            await save('slDomain', ''); await save('slPrefix', ''); await save('mode', 'agentmail');
-            C.amKey = ''; C.slKey = ''; C.slRelay = ''; C.slDomain = ''; C.slPrefix = ''; C.mode = 'agentmail';
-            am.value = ''; sl.value = ''; sle.value = ''; slp.value = '';
+            await save('slDomain', ''); await save('slPrefix', ''); await save('slAlias', '');
+            await save('mode', 'agentmail');
+            C.amKey = ''; C.slKey = ''; C.slRelay = ''; C.slDomain = ''; C.slPrefix = ''; C.slAlias = ''; C.mode = 'agentmail';
+            am.value = ''; sl.value = ''; sle.value = ''; slp.value = ''; sla.value = '';
             sld.innerHTML = '<option value="">— не выбрано —</option>';
             mode = 'agentmail'; upd();
             notify('Ключи удалены', 'ok', 3000);
@@ -774,17 +787,60 @@ async function getMsg(id, mid) {
     try { return JSON.parse(r.responseText); } catch { return null; }
 }
 
-// ═══════════════════ SIMPLELOGIN: АЛИАСЫ ═══════════════════
+// ═══════════════════ SIMPLELOGIN: СОЗДАНИЕ АЛИАСА ═══════════════════
+// Возвращает { email, id } либо null. id нужен для последующего удаления.
 async function createAlias() {
     if (!C.slKey) { notify('SimpleLogin: ключ не задан', 'err'); return null; }
+
+    // 1) Ручной alias — не удаляем, id = null
+    if (C.slAlias) {
+        logAlways('createAlias', 'использую ручной alias: ' + C.slAlias + ' (без удаления)');
+        notify('[SL] Использую готовый alias: ' + C.slAlias, 'info', 5000);
+        return { email: C.slAlias, id: null };
+    }
+
+    // 2) Автосоздание через API с ретраем для 429
     const body = { note: 'Auto Register' };
     if (C.slDomain) body.domain = C.slDomain;
     if (C.slPrefix) body.alias_prefix = C.slPrefix;
-    const r = await reqRetry({ method: 'POST', url: `${C.slBase}/api/alias/random/new`,
-        headers: { Authentication: C.slKey, 'Content-Type': 'application/json', Accept: 'application/json' },
-        data: JSON.stringify(body) }, 'SimpleLogin');
-    if (r.status !== 200 && r.status !== 201) { notify(`SimpleLogin: ${r.status}`, 'err', 12000); return null; }
-    try { const d = JSON.parse(r.responseText); return d.alias || d.email; } catch { return null; }
+
+    const SL_RETRIES = 5;
+    for (let i = 1; i <= SL_RETRIES; i++) {
+        const r = await req({
+            method: 'POST', url: `${C.slBase}/api/alias/random/new`,
+            headers: { Authentication: C.slKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+            data: JSON.stringify(body),
+        });
+        if (r.status === 200 || r.status === 201) {
+            try {
+                const d = JSON.parse(r.responseText);
+                // SimpleLogin возвращает { alias: "xxx@domain", id: 12345, ... } или { email, id }
+                const email = d.alias || d.email;
+                const id = d.id || d.alias_id || null;
+                logAlways('createAlias', `создан: email=${email} id=${id}`);
+                return { email, id };
+            } catch { return null; }
+        }
+        if (r.status === 429) {
+            const m = (r.responseHeaders || '').match(/retry-after:\s*(\d+)/i);
+            const wait = m ? parseInt(m[1]) : 60;
+            if (i < SL_RETRIES) {
+                notify(`[SL] Лимит API. Ждём ${wait}с (попытка ${i}/${SL_RETRIES})…`, 'warn', wait * 1000 + 1000);
+                await sleep(wait * 1000);
+                continue;
+            }
+            logError('createAlias', 'SL rate limit исчерпан после ' + SL_RETRIES + ' попыток');
+            notify(
+                '[SL] Лимит API исчерпан. Откройте app.simplelogin.io → Aliases → New Custom Alias, ' +
+                'создайте алиас вручную и вставьте его в настройках скрипта в поле «Готовый SimpleLogin alias».',
+                'err', 20000
+            );
+            return null;
+        }
+        notify(`SimpleLogin: ${r.status} ${(r.responseText || '').slice(0, 120)}`, 'err', 12000);
+        return null;
+    }
+    return null;
 }
 
 // ═══════════════════ ИЗВЛЕЧЕНИЕ КОДА ═══════════════════
@@ -880,12 +936,8 @@ const GR = {
                document.querySelector('input[inputmode="numeric"]') ||
                null;
     },
-    findGivenName() {
-        return document.querySelector('#givenName') || document.querySelector('input[name="givenName"]') || null;
-    },
-    findFamilyName() {
-        return document.querySelector('#familyName') || document.querySelector('input[name="familyName"]') || null;
-    },
+    findGivenName() { return document.querySelector('#givenName') || document.querySelector('input[name="givenName"]') || null; },
+    findFamilyName() { return document.querySelector('#familyName') || document.querySelector('input[name="familyName"]') || null; },
     findPwd() {
         return document.querySelector('#password') ||
                document.querySelector('input[name="password"]') ||
@@ -900,15 +952,10 @@ const GR = {
             return b.offsetParent !== null;
         });
         let patterns;
-        if (kind === 'email') {
-            patterns = ['зарегистрироваться', 'sign up', 'continue', 'продолжить', 'далее'];
-        } else if (kind === 'code') {
-            patterns = ['подтвердить email', 'verify email', 'confirm email'];
-        } else if (kind === 'profile') {
-            patterns = ['завершить регистрацию', 'complete registration', 'create account'];
-        } else {
-            patterns = ['зарегистрироваться', 'подтвердить email', 'завершить регистрацию', 'продолжить', 'далее'];
-        }
+        if (kind === 'email') patterns = ['зарегистрироваться', 'sign up', 'continue', 'продолжить', 'далее'];
+        else if (kind === 'code') patterns = ['подтвердить email', 'verify email', 'confirm email'];
+        else if (kind === 'profile') patterns = ['завершить регистрацию', 'complete registration', 'create account'];
+        else patterns = ['зарегистрироваться', 'подтвердить email', 'завершить регистрацию', 'продолжить', 'далее'];
         for (const p of patterns) {
             const b = filtered.find(b => b.textContent.trim().toLowerCase().includes(p));
             if (b) return b;
@@ -966,10 +1013,7 @@ const GR = {
     async waitFor(predicate, timeoutMs, label) {
         const start = Date.now();
         while (Date.now() - start < timeoutMs) {
-            if (predicate.call(this)) {
-                logAlways('waitFor', label + ' появился за ' + (Date.now() - start) + 'ms');
-                return true;
-            }
+            if (predicate.call(this)) { logAlways('waitFor', label + ' появился за ' + (Date.now() - start) + 'ms'); return true; }
             await sleep(200);
         }
         logAlways('waitFor', label + ' НЕ появился за ' + timeoutMs + 'ms');
@@ -1015,20 +1059,12 @@ const GR = {
         await delay(200, 500);
 
         const btn = this.findSubmit('code');
-        if (!btn) {
-            logAlways('submitCode', 'кнопка "Подтвердить email" отсутствует — возможно авто-переход');
-        } else {
-            logAlways('submitCode', 'жму submit: "' + (btn.textContent || '').trim() + '"');
-            await click(btn);
-        }
+        if (!btn) logAlways('submitCode', 'кнопка "Подтвердить email" отсутствует — возможно авто-переход');
+        else { logAlways('submitCode', 'жму submit: "' + (btn.textContent || '').trim() + '"'); await click(btn); }
 
         const start = Date.now();
         while (Date.now() - start < 5000) {
-            if (this.hasCodeError()) {
-                GS.lastError = 'code_invalid';
-                logAlways('submitCode', 'Grok отверг код');
-                return false;
-            }
+            if (this.hasCodeError()) { GS.lastError = 'code_invalid'; logAlways('submitCode', 'Grok отверг код'); return false; }
             if (this.hasProfileText()) {
                 logAlways('submitCode', 'profile-форма появилась');
                 GS.codeDone = true;
@@ -1037,11 +1073,7 @@ const GR = {
             }
             await sleep(200);
         }
-        if (!this.hasCodeError()) {
-            GS.codeDone = true;
-            await save('gr_codeDone', true);
-            return true;
-        }
+        if (!this.hasCodeError()) { GS.codeDone = true; await save('gr_codeDone', true); return true; }
         return false;
     },
     async submitProfile(data) {
@@ -1051,12 +1083,9 @@ const GR = {
         if (!gi || !fi || !pi) { notify('[GR] Поля профиля не найдены', 'err'); return false; }
         notify('[GR] Заполняю профиль…', 'info', 4000);
 
-        await typeHuman(gi, givenName);
-        await delay(150, 300);
-        await typeHuman(fi, familyName);
-        await delay(150, 300);
-        await typeHuman(pi, password);
-        await delay(200, 500);
+        await typeHuman(gi, givenName); await delay(150, 300);
+        await typeHuman(fi, familyName); await delay(150, 300);
+        await typeHuman(pi, password); await delay(200, 500);
 
         logAlways('submitProfile', 'gi.value="' + gi.value + '" fi.value="' + fi.value + '" pi.len=' + pi.value.length);
 
@@ -1066,7 +1095,6 @@ const GR = {
             setVal(fi, familyName); fireInput(fi, familyName); fi.dispatchEvent(new Event('change', { bubbles: true }));
             setVal(pi, password); fireInput(pi, password); pi.dispatchEvent(new Event('change', { bubbles: true }));
             await sleep(300);
-            logAlways('submitProfile', 'after force: gi="' + gi.value + '" fi="' + fi.value + '" pi.len=' + pi.value.length);
         }
 
         if (this.hasTurnstile()) {
@@ -1108,15 +1136,31 @@ const GR = {
         notify('[GR] Профиль не принят, проверь вручную', 'warn', 10000);
         return false;
     },
+    // ─── УДАЛЕНИЕ АЛИАСА после успешной регистрации ───
+    async cleanupAfterSuccess() {
+        if (C.mode !== 'simplelogin') return;
+        // Удаляем только автосозданный алиас, ручной — не трогаем
+        if (GS.slAliasId) {
+            notify('[SL] Удаляю использованный алиас…', 'info', 3000);
+            const ok = await deleteSimpleLoginAlias(GS.slAliasId);
+            if (ok) {
+                logAlways('cleanup', 'алиас удалён: id=' + GS.slAliasId + ' (' + (GS.slAliasEmail || '') + ')');
+                notify('[SL] Алиас удалён', 'ok', 3000);
+            } else {
+                notify('[SL] Не удалось удалить алиас (см. лог)', 'warn', 5000);
+            }
+            GS.slAliasId = null;
+            GS.slAliasEmail = null;
+            await save('gr_slAliasId', null);
+            await save('gr_slAliasEmail', null);
+        }
+    },
     async run() {
         if (GS.running) { logAlways('GR', 'run() уже запущен'); return; }
         const stage = this.detectStage();
         GS.detectedStage = stage;
         logAlways('GR', 'run() stage=' + stage);
-        if (stage === 'unknown') {
-            notify('[GR] Не понял этап. Скинь отчёт.', 'warn', 12000);
-            return;
-        }
+        if (stage === 'unknown') { notify('[GR] Не понял этап. Скинь отчёт.', 'warn', 12000); return; }
         GS.running = true;
         try {
             if (stage === 'method') {
@@ -1164,10 +1208,15 @@ const GR = {
             const relay = ib.find(i => (i.inbox_id || i.email) === C.slRelay);
             if (!relay) { notify('[GR] AgentMail: relay не найден: ' + C.slRelay, 'err', 10000); return null; }
             GS.inbox = { id: relay.inbox_id, email: relay.inbox_id || relay.email };
-            const alias = await createAlias();
-            if (!alias) return null;
-            email = alias;
-            notify('[GR] Алиас: ' + alias + ' → ' + GS.inbox.email, 'info', 6000);
+            const res = await createAlias();
+            if (!res || !res.email) return null;
+            email = res.email;
+            GS.slAliasId = res.id || null;
+            GS.slAliasEmail = res.email;
+            await save('gr_slAliasId', GS.slAliasId);
+            await save('gr_slAliasEmail', GS.slAliasEmail);
+            logAlways('prepareEmail', 'alias=' + email + ' id=' + (GS.slAliasId || '—'));
+            notify('[GR] Алиас: ' + email + ' → ' + GS.inbox.email, 'info', 6000);
         } else {
             let ib = await createInbox();
             if (!ib) {
@@ -1247,7 +1296,11 @@ const GR = {
                         await save('gr_pwd', pwd);
                         notify('[GR] 🔑 Пароль: ' + pwd, 'warn', 20000);
                         try { GM_setClipboard(pwd, 'text'); } catch {}
-                        await this.submitProfile(data);
+                        const profileOk = await this.submitProfile(data);
+                        if (profileOk) {
+                            // УСПЕХ — удаляем использованный алиас
+                            await this.cleanupAfterSuccess();
+                        }
                     }
                     return;
                 }
@@ -1321,9 +1374,16 @@ function showHelp() {
 <li>«Новая регистрация» — создаст новый inbox.</li>
 <li>Скрипт: method → email → код → профиль.</li>
 <li>Капчу Cloudflare проходите вручную.</li>
+<li><b style="color:var(--gfg)">После успешной регистрации авто-созданный SimpleLogin-алиас удаляется.</b></li>
 </ol>
-<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600">📧 SimpleLogin</h3>
-<p style="margin:0 0 12px 0;color:var(--gmut);font-size:13px">Домены подгружаются кнопкой «Загрузить домены» из API — только бесплатные.</p>
+<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600">📧 SimpleLogin и rate limit (429)</h3>
+<p style="margin:0 0 8px 0;color:var(--gmut);font-size:13px">SimpleLogin имеет жёсткий лимит на создание random-алиасов через API. Если постоянно <code>429 Rate limit</code>:</p>
+<ol style="margin:0 0 12px 0;padding-left:20px;color:var(--gmut);font-size:13px;line-height:1.7">
+<li>Откройте <b style="color:var(--gfg)">app.simplelogin.io → Aliases → New Custom Alias</b>.</li>
+<li>Создайте алиас вручную (например <code>grok1@slmail.me</code>).</li>
+<li>Вставьте его в настройках в поле <b>«Готовый SimpleLogin alias»</b>.</li>
+<li>Сохраните. Скрипт больше не будет дёргать API и не будет удалять этот алиас.</li>
+</ol>
 </div>`;
     helpModal.appendChild(m);
     document.body.appendChild(helpModal);
@@ -1400,8 +1460,7 @@ async function copyCtx() {
         uniq.push(m);
     }
     const text = uniq.map(m => {
-        const label = m.role === 'user' ? 'Пользователь'
-                    : m.role === 'assistant' ? 'Grok' : '?';
+        const label = m.role === 'user' ? 'Пользователь' : m.role === 'assistant' ? 'Grok' : '?';
         return `[${label}]: ${m.text}`;
     }).join('\n\n');
     ctx = text;
@@ -1426,8 +1485,7 @@ async function pasteCtx() {
     inp.focus();
     await sleep(100);
     if (inp.tagName === 'TEXTAREA' || inp.tagName === 'INPUT') {
-        setVal(inp, ctx);
-        fireInput(inp, ctx);
+        setVal(inp, ctx); fireInput(inp, ctx);
         inp.dispatchEvent(new Event('change', { bubbles: true }));
     } else if (inp.isContentEditable) {
         try {
@@ -1527,6 +1585,17 @@ async function startReg() {
     const choice = await startDialog();
     if (choice === 'cancel') return;
     if (choice === 'new') {
+        // Перед новой регистрацией — удаляем прошлый алиас, если он был
+        const oldAliasId = await load('gr_slAliasId');
+        if (oldAliasId && C.mode === 'simplelogin') {
+            notify('[SL] Удаляю алиас от прошлого запуска…', 'info', 4000);
+            await deleteSimpleLoginAlias(oldAliasId);
+        }
+        GS.slAliasId = null;
+        GS.slAliasEmail = null;
+        await save('gr_slAliasId', null);
+        await save('gr_slAliasEmail', null);
+
         GS.inbox = null; GS.forceNewInbox = true;
         await save('gr_inbox', null);
         await save('gr_codeDone', false);
@@ -1536,6 +1605,8 @@ async function startReg() {
     } else {
         GS.inbox = await load('gr_inbox');
         GS.codeReqAt = await load('gr_codeReqAt');
+        GS.slAliasId = await load('gr_slAliasId');
+        GS.slAliasEmail = await load('gr_slAliasEmail');
         if (await load('gr_codeDone')) GS.codeDone = true;
         if (await load('gr_profileDone')) GS.profileDone = true;
         if (await load('gr_emailDone')) GS.emailDone = true;
@@ -1553,10 +1624,7 @@ async function init() {
     inited = true;
     logAlways('init', 'start host=' + location.hostname + ' path=' + location.pathname);
     injectCSS();
-
-    // ЗАГРУЖАЕМ ВСЕ КЛЮЧИ СРАЗУ — до всего остального
     await loadKeys();
-
     createMenu();
     await sleep(300);
 
@@ -1569,6 +1637,8 @@ async function init() {
     if (savedInbox?.id) {
         GS.inbox = savedInbox;
         GS.codeReqAt = await load('gr_codeReqAt');
+        GS.slAliasId = await load('gr_slAliasId');
+        GS.slAliasEmail = await load('gr_slAliasEmail');
         if (await load('gr_codeDone')) GS.codeDone = true;
         if (await load('gr_profileDone')) GS.profileDone = true;
         if (await load('gr_emailDone')) GS.emailDone = true;
