@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Auto Register (AgentMail + SimpleLogin)
 // @namespace    http://tampermonkey.net/
-// @version      66.0
-// @description  Авторегистрация ChatGPT через AgentMail.to + современное меню + авто-переход
+// @version      67.0
+// @description  Авторегистрация ChatGPT через AgentMail.to + стиль ChatGPT + авто-переход
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://auth.openai.com/*
@@ -40,7 +40,7 @@
     let helpModal = null, settingsModal = null, savedContext = null;
 
     // ============================================
-    // CSS: тема, стекло, анимации
+    // CSS: тема ChatGPT, стекло, анимации
     // ============================================
     function injectThemeStyles() {
         if (document.getElementById('gpt-auto-theme-styles')) return;
@@ -48,41 +48,41 @@
         s.id = 'gpt-auto-theme-styles';
         s.textContent = `
             :root {
-                --gpt-bg: rgba(255,255,255,0.82);
+                --gpt-bg: rgba(255,255,255,0.85);
                 --gpt-bg-solid: #ffffff;
-                --gpt-fg: #222222;
-                --gpt-fg-muted: #888888;
+                --gpt-fg: #0d0d0d;
+                --gpt-fg-muted: #8e8e8e;
                 --gpt-border: rgba(0,0,0,0.08);
                 --gpt-hover: rgba(0,0,0,0.05);
                 --gpt-shadow: rgba(0,0,0,0.12);
                 --gpt-overlay: rgba(0,0,0,0.5);
                 --gpt-accent: #10a37f;
-                --gpt-danger: #e74c3c;
-                --gpt-blur: 18px;
-                --gpt-radius: 14px;
+                --gpt-danger: #ef4146;
+                --gpt-blur: 20px;
+                --gpt-radius: 12px;
                 --gpt-ease: cubic-bezier(0.16, 1, 0.3, 1);
             }
             @media (prefers-color-scheme: dark) {
                 :root {
-                    --gpt-bg: rgba(30,30,30,0.82);
-                    --gpt-bg-solid: #1e1e1e;
-                    --gpt-fg: #eeeeee;
-                    --gpt-fg-muted: #888888;
+                    --gpt-bg: rgba(23,23,23,0.85);
+                    --gpt-bg-solid: #171717;
+                    --gpt-fg: #ececec;
+                    --gpt-fg-muted: #8e8e8e;
                     --gpt-border: rgba(255,255,255,0.10);
-                    --gpt-hover: rgba(255,255,255,0.07);
-                    --gpt-shadow: rgba(0,0,0,0.45);
-                    --gpt-overlay: rgba(0,0,0,0.6);
+                    --gpt-hover: rgba(255,255,255,0.08);
+                    --gpt-shadow: rgba(0,0,0,0.4);
+                    --gpt-overlay: rgba(0,0,0,0.7);
                 }
             }
             html.dark {
-                --gpt-bg: rgba(30,30,30,0.82);
-                --gpt-bg-solid: #1e1e1e;
-                --gpt-fg: #eeeeee;
-                --gpt-fg-muted: #888888;
+                --gpt-bg: rgba(23,23,23,0.85);
+                --gpt-bg-solid: #171717;
+                --gpt-fg: #ececec;
+                --gpt-fg-muted: #8e8e8e;
                 --gpt-border: rgba(255,255,255,0.10);
-                --gpt-hover: rgba(255,255,255,0.07);
-                --gpt-shadow: rgba(0,0,0,0.45);
-                --gpt-overlay: rgba(0,0,0,0.6);
+                --gpt-hover: rgba(255,255,255,0.08);
+                --gpt-shadow: rgba(0,0,0,0.4);
+                --gpt-overlay: rgba(0,0,0,0.7);
             }
 
             .gpt-glass {
@@ -90,7 +90,7 @@
                 backdrop-filter: blur(var(--gpt-blur)) saturate(180%);
                 -webkit-backdrop-filter: blur(var(--gpt-blur)) saturate(180%);
                 border: 1px solid var(--gpt-border);
-                box-shadow: 0 8px 32px var(--gpt-shadow);
+                box-shadow: 0 4px 24px var(--gpt-shadow);
             }
 
             .gpt-input {
@@ -106,9 +106,8 @@
             .gpt-radio-row { display: flex; gap: 12px; margin-bottom: 16px; }
             .gpt-radio-row label { display: flex; align-items: center; gap: 6px; color: var(--gpt-fg); font-size: 14px; cursor: pointer; }
 
-            /* Анимация появления меню */
             @keyframes gptMenuIn {
-                from { opacity: 0; transform: translateY(-8px) scale(0.96); }
+                from { opacity: 0; transform: translateY(-6px) scale(0.97); }
                 to   { opacity: 1; transform: translateY(0) scale(1); }
             }
             @keyframes gptFadeIn {
@@ -116,18 +115,18 @@
                 to   { opacity: 1; }
             }
             @keyframes gptItemIn {
-                from { opacity: 0; transform: translateX(-6px); }
+                from { opacity: 0; transform: translateX(-4px); }
                 to   { opacity: 1; transform: translateX(0); }
             }
 
             .gpt-menu-panel {
-                animation: gptMenuIn .28s var(--gpt-ease) both;
+                animation: gptMenuIn .25s var(--gpt-ease) both;
             }
             .gpt-menu-item {
                 animation: gptItemIn .3s var(--gpt-ease) both;
-                transition: background .18s var(--gpt-ease), transform .18s var(--gpt-ease);
+                transition: background .15s var(--gpt-ease), transform .1s var(--gpt-ease);
             }
-            .gpt-menu-item:hover { transform: translateX(2px); }
+            .gpt-menu-item:hover { background: var(--gpt-hover) !important; }
             .gpt-menu-item:active { transform: scale(0.98); }
         `;
         document.head.appendChild(s);
@@ -259,7 +258,7 @@
 
     function showNotification(text, type = 'info', duration = 5000) {
         createNotificationContainer();
-        const colors = { info: '#3498db', success: '#10a37f', warning: '#f39c12', error: '#e74c3c', debug: '#7f8c8d' };
+        const colors = { info: '#3498db', success: '#10a37f', warning: '#f39c12', error: '#ef4146', debug: '#8e8e8e' };
         const el = document.createElement('div');
         el.className = 'gpt-glass';
         el.style.cssText = `padding:12px 16px;border-radius:12px;font-size:14px;border-left:4px solid ${colors[type] || '#333'};pointer-events:auto;display:flex;align-items:center;gap:10px;word-break:break-word;color:var(--gpt-fg);animation:gptFadeIn .25s var(--gpt-ease) both;`;
@@ -699,7 +698,7 @@
     }
 
     // ============================================
-    // МЕНЮ (современное, слева от логотипа)
+    // МЕНЮ (стиль ChatGPT, слева от логотипа)
     // ============================================
     let menuButton = null, menuPanel = null, menuVisible = false;
     let statusLabel = null;
@@ -786,10 +785,9 @@
         if (menuVisible) {
             updateMenuItems();
             menuPanel.style.display = 'flex';
-            // Перезапуск анимации
             menuPanel.style.animation = 'none';
             void menuPanel.offsetWidth;
-            menuPanel.style.animation = 'gptMenuIn .28s var(--gpt-ease) both';
+            menuPanel.style.animation = 'gptMenuIn .25s var(--gpt-ease) both';
         } else {
             closeMenu();
         }
@@ -802,7 +800,6 @@
         const copy = menuPanel.querySelector('#gpt-copy-btn');
         const paste = menuPanel.querySelector('#gpt-paste-btn');
 
-        // Скрываем регистрацию после завершения
         if (register) register.style.display = registrationComplete ? 'none' : 'flex';
         if (copy) copy.style.display = loggedIn ? 'flex' : 'none';
         if (paste) paste.style.display = loggedIn ? 'flex' : 'none';
@@ -810,8 +807,10 @@
 
     function createMenu() {
         if (menuButton) return;
+        if (!document.body) return;
 
         const isMobile = window.innerWidth < 768;
+        // На мобильных ставим справа от родного гамбургера (он обычно на left: 16px)
         const leftPos = isMobile ? '56px' : '64px';
 
         menuButton = document.createElement('button');
@@ -825,7 +824,8 @@
         menuButton.className = 'gpt-glass';
         menuButton.style.cssText = `
             position:fixed; top:8px; left:${leftPos}; z-index:99999;
-            height:36px; padding:0 12px; border-radius:10px;
+            height:36px; padding:${isMobile ? '0' : '0 12px'}; border-radius:${isMobile ? '50%' : '10px'};
+            width:${isMobile ? '36px' : 'auto'};
             color:var(--gpt-fg);
             cursor:pointer; font-family:inherit;
             display:flex; align-items:center; justify-content:center;
@@ -848,18 +848,17 @@
         menuPanel.style.cssText = `
             position:fixed; top:52px; left:${leftPos}; z-index:99999;
             display:none; flex-direction:column; gap:4px;
-            padding:10px; border-radius:var(--gpt-radius);
-            min-width:230px;
+            padding:8px; border-radius:var(--gpt-radius);
+            min-width:${isMobile ? '200px' : '230px'};
+            max-width:calc(100vw - 32px);
         `;
 
         const makeBtn = (id, icon, text, onClick, delay = 0) => {
             const b = document.createElement('button');
             b.id = id;
             b.className = 'gpt-menu-item';
-            b.innerHTML = `<span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;margin-right:8px;opacity:.85;">${icon}</span><span>${text}</span>`;
-            b.style.cssText = `display:flex;align-items:center;padding:10px 12px;background:transparent;color:var(--gpt-fg);border:none;border-radius:10px;font-size:13px;cursor:pointer;font-weight:500;text-align:left;animation-delay:${delay}ms;`;
-            b.addEventListener('mouseenter', () => b.style.background = 'var(--gpt-hover)');
-            b.addEventListener('mouseleave', () => b.style.background = 'transparent');
+            b.innerHTML = `<span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;margin-right:8px;opacity:.85;">${icon}</span><span style="font-size:14px;">${text}</span>`;
+            b.style.cssText = `display:flex;align-items:center;padding:10px 12px;background:transparent;color:var(--gpt-fg);border:none;border-radius:10px;cursor:pointer;font-weight:500;text-align:left;animation-delay:${delay}ms;`;
             b.onclick = (e) => { e.stopPropagation(); onClick(); };
             return b;
         };
@@ -880,7 +879,6 @@
             }
         });
 
-        // Обновление позиции при ресайзе
         window.addEventListener('resize', () => {
             const newLeft = window.innerWidth < 768 ? '56px' : '64px';
             if (menuButton) menuButton.style.left = newLeft;
@@ -987,13 +985,12 @@
         await humanDelay(100, 300);
         await clickContinue();
 
-        startUrlWatcher(() => (!registration { ifComplete) runStage(); }, 12000);
+        startUrlWatcher(() => { if (!registrationComplete) runStage(); }, 12000);
     }
 
-    // ⚡ ИСПРАВЛЕНО: принудительное продолжение через 2 минуты
     async function watchCodeResult() {
         const start = Date.now();
-        const maxWait = 120000; // 2 минуты
+        const maxWait = 120000;
 
         while (Date.now() - start < maxWait) {
             await new Promise(r => setTimeout(r, 1500));
@@ -1021,7 +1018,6 @@
             }
         }
 
-        // По истечении таймаута — принудительный запуск
         showNotification('Таймаут ожидания. Продолжаю…', 'warning', 5000);
         isRunning = false;
         runStage();
@@ -1115,7 +1111,7 @@
             await saveData('complete', true);
             showNotification('Регистрация завершена!', 'success', 8000);
             setMenuStatus('Готово', '#10a37f');
-            updateMenuItems(); // Скрываем кнопку регистрации
+            updateMenuItems();
 
             if (CONFIG.deleteInboxAfterUse && CONFIG.emailMode !== 'simplelogin' && currentInbox?.inboxId) {
                 const deleted = await deleteAgentMailInbox(currentInbox.inboxId);
@@ -1174,34 +1170,52 @@
     }
 
     // ============================================
-    // INIT
+    // INIT (с ожиданием body и защитой от ошибок)
     // ============================================
+    function waitForBody() {
+        return new Promise(resolve => {
+            if (document.body) { resolve(); return; }
+            const observer = new MutationObserver(() => {
+                if (document.body) { observer.disconnect(); resolve(); }
+            });
+            observer.observe(document.documentElement, { childList: true, subtree: true });
+            setTimeout(() => { observer.disconnect(); resolve(); }, 10000);
+        });
+    }
+
     async function init() {
         if (initDone) return;
-        initDone = true;
-        injectThemeStyles();
+        try {
+            await waitForBody();
+            injectThemeStyles();
 
-        const saved = await getData('agentMailApiKey');
-        if (saved) CONFIG.agentMailApiKey = saved;
-        CONFIG.simpleLoginApiKey = (await getData('simpleLoginApiKey')) || '';
-        CONFIG.emailMode = (await getData('emailMode')) || 'agentmail';
+            const saved = await getData('agentMailApiKey');
+            if (saved) CONFIG.agentMailApiKey = saved;
+            CONFIG.simpleLoginApiKey = (await getData('simpleLoginApiKey')) || '';
+            CONFIG.emailMode = (await getData('emailMode')) || 'agentmail';
 
-        codeRequestedAt = await getData('codeRequestedAt');
-        ((await getData('usedMessageIds')) || []).forEach(id => usedMessageIds.add(id));
-        savedContext = await getData('savedContext');
-        currentInbox = await getData('currentInbox');
+            codeRequestedAt = await getData('codeRequestedAt');
+            ((await getData('usedMessageIds')) || []).forEach(id => usedMessageIds.add(id));
+            savedContext = await getData('savedContext');
+            currentInbox = await getData('currentInbox');
 
-        if (await getData('complete') && isUserLoggedIn()) registrationComplete = true;
+            if (await getData('complete') && isUserLoggedIn()) registrationComplete = true;
 
-        createMenu();
+            createMenu();
 
-        let lastUrl = window.location.href;
-        window.urlCheckInterval = setInterval(() => {
-            if (window.location.href !== lastUrl) {
-                lastUrl = window.location.href;
-                if (menuVisible) updateMenuItems();
-            }
-        }, 1000);
+            let lastUrl = window.location.href;
+            window.urlCheckInterval = setInterval(() => {
+                if (window.location.href !== lastUrl) {
+                    lastUrl = window.location.href;
+                    if (menuVisible) updateMenuItems();
+                }
+            }, 1000);
+
+            initDone = true;
+        } catch (e) {
+            console.error('[ChatGPT Auto Register] Ошибка инициализации:', e);
+            showNotification(`Ошибка инициализации: ${e.message}`, 'error', 10000);
+        }
     }
 
     if (document.readyState === 'complete') init();
