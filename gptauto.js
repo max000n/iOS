@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      73.0
-// @description  Авторегистрация ChatGPT через AgentMail.to / SimpleLogin
+// @version      74.0
+// @description  Авторегистрация ChatGPT через AgentMail.to / SimpleLogin + диагностика
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://auth.openai.com/*
@@ -22,9 +22,10 @@
 const C = {
     amKey: '', amBase: 'https://api.agentmail.to/v0',
     slKey: '', slBase: 'https://app.simplelogin.io',
-    mode: 'agentmail',        // 'agentmail' | 'simplelogin'
+    mode: 'agentmail',
     interval: 3000, maxTries: 120, tolMs: 60000,
     fast: true, delInbox: true, retries: 3, shift: true,
+    debug: false,
 };
 
 // ═══════════════════ СОСТОЯНИЕ ═══════════════════
@@ -34,6 +35,153 @@ let codeDone = false, profileDone = false, regDone = false,
     codeReqAt = null, usedIds = new Set(), urlTimer = null,
     helpModal = null, settingsModal = null, ctx = null,
     notifyDone = false, canContinue = false;
+
+// ═══════════════════ ДИАГНОСТИКА ═══════════════════
+const LOG_MAX = 500;
+const logBuf = [];
+let diagErrors = [];
+
+function ts() {
+    const d = new Date();
+    return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+}
+
+function log(level, tag, ...args) {
+    if (!C.debug && level !== 'ERROR') return;
+    const msg = args.map(a => {
+        if (a instanceof Error) return a.message + (a.stack ? '\n' + a.stack : '');
+        if (typeof a === 'object') {
+            try { return JSON.stringify(a); } catch { return String(a); }
+        }
+        return String(a);
+    }).join(' ');
+    const line = `[${ts()}] [${level}] [${tag}] ${msg}`;
+    logBuf.push(line);
+    if (logBuf.length > LOG_MAX) logBuf.shift();
+    if (level === 'ERROR') {
+        diagErrors.push(line);
+        if (diagErrors.length > 100) diagErrors.shift();
+    }
+    if (logBuf.length % 10 === 0 || level === 'ERROR') {
+        GM.setValue('cg_logs', logBuf.slice(-200)).catch(() => {});
+    }
+    console.log(line);
+}
+
+addEventListener('error', e => {
+    log('ERROR', 'window', e.message + ' at ' + e.filename + ':' + e.lineno + ':' + e.colno);
+});
+addEventListener('unhandledrejection', e => {
+    log('ERROR', 'promise', e.reason?.message || String(e.reason));
+});
+
+async function buildReport() {
+    const p = [];
+    p.push('═══ CHATGPT AUTO REGISTER — ОТЧЁТ ═══');
+    p.push('Дата: ' + new Date().toISOString());
+    p.push('Версия скрипта: 74.0');
+    p.push('URL: ' + location.href);
+    p.push('User Agent: ' + navigator.userAgent);
+    p.push('Платформа: ' + navigator.platform + ' | Mobile: ' + (innerWidth < 768));
+    p.push('Окно: ' + innerWidth + '×' + innerHeight);
+    p.push('');
+    p.push('─── СОСТОЯНИЕ ───');
+    p.push('running: ' + running);
+    p.push('regDone: ' + regDone);
+    p.push('verifyDone: ' + verifyDone);
+    p.push('codeDone: ' + codeDone);
+    p.push('pwdDone: ' + pwdDone);
+    p.push('profileDone: ' + profileDone);
+    p.push('polling: ' + polling);
+    p.push('canContinue: ' + canContinue);
+    p.push('notifyDone: ' + notifyDone);
+    p.push('loginTried: ' + loginTried);
+    p.push('inbox: ' + JSON.stringify(inbox));
+    p.push('codeReqAt: ' + (codeReqAt ? new Date(codeReqAt).toISOString() : null));
+    p.push('usedIds: ' + usedIds.size);
+    p.push('');
+    p.push('─── КОНФИГ ───');
+    p.push('mode: ' + C.mode);
+    p.push('debug: ' + C.debug);
+    p.push('fast: ' + C.fast);
+    p.push('shift: ' + C.shift);
+    p.push('amKey: ' + (C.amKey ? C.amKey.slice(0, 8) + '…(' + C.amKey.length + ')' : 'нет'));
+    p.push('slKey: ' + (C.slKey ? C.slKey.slice(0, 8) + '…(' + C.slKey.length + ')' : 'нет'));
+    p.push('');
+    p.push('─── DOM ───');
+    p.push('findEmail(): ' + (findEmail() ? 'есть' : 'нет'));
+    p.push('findPwd(): ' + (findPwd() ? 'есть' : 'нет'));
+    p.push('findCodeInp(): ' + (findCodeInp() ? 'есть' : 'нет'));
+    const prof = findProfile();
+    p.push('findProfile().name: ' + (prof.name ? 'есть' : 'нет'));
+    p.push('findProfile().age: ' + (prof.age ? 'есть' : 'нет'));
+    p.push('detect(): ' + detect());
+    p.push('hasLoginBtn: ' + hasLoginBtn());
+    p.push('loggedIn: ' + loggedIn());
+    const lg = findLogo();
+    p.push('logo: ' + (lg ? 'есть @ right=' + Math.round(lg.getBoundingClientRect().right) : 'нет'));
+    p.push('');
+    p.push('─── ОШИБКИ (' + diagErrors.length + ') ───');
+    if (!diagErrors.length) p.push('(нет)');
+    else diagErrors.slice(-20).forEach(e => p.push(e));
+    p.push('');
+    p.push('─── ЛОГ (' + logBuf.length + ') ───');
+    if (!logBuf.length) p.push('(пусто — включите диагностику в меню)');
+    else logBuf.slice(-200).forEach(l => p.push(l));
+    p.push('');
+    p.push('═══ КОНЕЦ ОТЧЁТА ═══');
+    return p.join('\n');
+}
+
+async function copyReport() {
+    const report = await buildReport();
+    let ok = false;
+    try {
+        if (typeof GM_setClipboard !== 'undefined') { GM_setClipboard(report, 'text'); ok = true; }
+        else if (navigator.clipboard) { await navigator.clipboard.writeText(report); ok = true; }
+    } catch (e) { log('ERROR', 'copyReport', e); }
+    showReportModal(report, ok);
+}
+
+function showReportModal(report, copied) {
+    document.getElementById('gpt-report-modal')?.remove();
+    const ov = document.createElement('div');
+    ov.id = 'gpt-report-modal';
+    ov.style.cssText = 'position:fixed;inset:0;background:var(--govl);z-index:9999999;display:flex;align-items:center;justify-content:center;animation:gFd .2s var(--gease) both';
+    const m = document.createElement('div');
+    m.className = 'gpt-gl';
+    m.style.cssText = 'padding:20px;border-radius:20px;max-width:720px;width:92%;max-height:85vh;display:flex;flex-direction:column;color:var(--gfg);animation:gIn .3s var(--gease) both';
+    m.innerHTML = `
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+<h2 style="margin:0;font-size:17px;font-weight:600">Отчёт диагностики</h2>
+<button id="grmc" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--gmut);padding:0 5px">×</button></div>
+<p style="margin:0 0 10px 0;font-size:12px;color:var(--gmut)">${copied ? '✓ Скопировано в буфер. Вставьте в чат.' : '⚠ Буфер недоступен. Выделите текст вручную.'}</p>
+<textarea id="grmt" readonly style="flex:1;min-height:400px;width:100%;padding:12px;border-radius:10px;border:1px solid var(--gbd);background:var(--gelev);color:var(--gfg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.4;resize:vertical;box-sizing:border-box">${report.replace(/</g, '&lt;')}</textarea>
+<div style="display:flex;gap:10px;margin-top:12px">
+<button id="grmc2" style="flex:1;padding:12px;background:var(--gacc);color:var(--gaccf);border:none;border-radius:999px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit">Скопировать снова</button>
+<button id="grmclr" style="padding:12px 20px;background:transparent;color:var(--gdngr);border:1px solid var(--gbd);border-radius:999px;font-size:14px;cursor:pointer;font-family:inherit">Очистить логи</button>
+</div>`;
+    ov.appendChild(m);
+    document.body.appendChild(ov);
+
+    const txt = m.querySelector('#grmt');
+    const copyAgain = async () => {
+        try {
+            if (typeof GM_setClipboard !== 'undefined') GM_setClipboard(report, 'text');
+            else { txt.focus(); txt.select(); document.execCommand('copy'); }
+            notify('Скопировано', 'ok', 2000);
+        } catch { notify('Не удалось скопировать', 'err', 3000); }
+    };
+    m.querySelector('#grmc').onclick = () => ov.remove();
+    m.querySelector('#grmc2').onclick = copyAgain;
+    m.querySelector('#grmclr').onclick = async () => {
+        logBuf.length = 0; diagErrors.length = 0;
+        await GM.setValue('cg_logs', []).catch(() => {});
+        notify('Логи очищены', 'ok', 2000);
+    };
+    ov.onclick = e => { if (e.target === ov) ov.remove(); };
+    setTimeout(() => { txt.focus(); txt.setSelectionRange(0, 0); }, 100);
+}
 
 // ═══════════════════ CSS ═══════════════════
 function injectCSS() {
@@ -90,7 +238,8 @@ function fireInput(el, v) {
     catch { el.dispatchEvent(new Event('input', { bubbles: true })); }
 }
 async function click(el) {
-    if (!el) return false;
+    if (!el) { log('DEBUG', 'click', 'null element'); return false; }
+    log('DEBUG', 'click', (el.tagName || '?') + ' "' + (el.textContent || '').trim().slice(0, 30) + '"');
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     await delay(50, 150);
     try {
@@ -122,11 +271,13 @@ const load = k => GM.getValue('cg_' + k, null).catch(() => null);
 
 // ═══════════════════ HTTP ═══════════════════
 function req(opts) {
+    const short = (opts.url || '').replace(/^https?:\/\/[^/]+/, '').slice(0, 60);
+    log('DEBUG', 'http', (opts.method || 'GET') + ' ' + short);
     return new Promise(res => GM_xmlhttpRequest({
         ...opts,
-        onload: res,
-        onerror: e => res({ status: 0, responseText: '', error: e }),
-        ontimeout: () => res({ status: 0, responseText: 'timeout' }),
+        onload: r => { log('DEBUG', 'http', '← ' + r.status + ' ' + short); res(r); },
+        onerror: e => { log('ERROR', 'http', 'net error: ' + short); res({ status: 0, responseText: '', error: e }); },
+        ontimeout: () => { log('ERROR', 'http', 'timeout: ' + short); res({ status: 0, responseText: 'timeout' }); },
     }));
 }
 async function reqRetry(opts, label = 'API') {
@@ -138,9 +289,7 @@ async function reqRetry(opts, label = 'API') {
             if (i < C.retries) { notify(`${label}: лимит, ждём ${w}с…`, 'warn', w * 1000 + 1000); await sleep(w * 1000); continue; }
             return r;
         }
-        if (r.status >= 500 && r.status < 600 && i < C.retries) {
-            await sleep(2000 * i); continue;
-        }
+        if (r.status >= 500 && r.status < 600 && i < C.retries) { await sleep(2000 * i); continue; }
         if (r.status === 0 && i < C.retries) { await sleep(2000); continue; }
         return r;
     }
@@ -150,6 +299,7 @@ async function reqRetry(opts, label = 'API') {
 // ═══════════════════ УВЕДОМЛЕНИЯ ═══════════════════
 let ntfCont = null;
 function notify(text, type = 'info', dur = 5000) {
+    log(type === 'err' ? 'ERROR' : 'INFO', 'notify', '[' + type + '] ' + text);
     if (!ntfCont) {
         ntfCont = document.createElement('div');
         ntfCont.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:999999;display:flex;flex-direction:column;gap:8px;max-width:90%;width:480px;pointer-events:none';
@@ -166,7 +316,6 @@ function notify(text, type = 'info', dur = 5000) {
         el.style.transition = 'opacity .4s';
         setTimeout(() => el.remove(), 400);
     }, dur);
-    console.log(`[${type}] ${text}`);
 }
 
 // ═══════════════════ НАСТРОЙКИ ═══════════════════
@@ -237,6 +386,7 @@ function openSettings() {
             if (mode === 'simplelogin' && !sk) return notify('Для SimpleLogin укажите API Key', 'err', 5000);
             await save('amKey', ak); await save('slKey', sk || null); await save('mode', mode);
             C.amKey = ak; C.slKey = sk; C.mode = mode;
+            log('INFO', 'settings', 'saved mode=' + mode);
             notify('Настройки сохранены', 'ok', 3000);
             close(true);
         };
@@ -270,6 +420,7 @@ function genUser() {
 async function createInbox() {
     if (!C.amKey) { notify('AgentMail: ключ не задан', 'err'); return null; }
     const username = genUser();
+    log('INFO', 'inbox', 'create ' + username);
     const r = await reqRetry({
         method: 'POST', url: `${C.amBase}/inboxes`,
         headers: { Authorization: `Bearer ${C.amKey}`, 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -377,11 +528,15 @@ function fill(el, v) {
     fireInput(el, v); el.dispatchEvent(new Event('change', { bubbles: true }));
     return true;
 }
-const findEmail = () => ['mobile-auth-email', 'input[type="email"]', 'input[name="login_hint"]',
-    'input[autocomplete="email"]', 'input[placeholder*="email" i]']
-    .map(s => s.startsWith('#') || s.includes('input') ? document.querySelector(s.startsWith('#') ? '#' + s : s) : null)
-    .find(el => el && el.offsetParent !== null) || null;
-
+function findEmail() {
+    const sels = ['#mobile-auth-email', 'input[type="email"]', 'input[name="login_hint"]',
+                  'input[autocomplete="email"]', 'input[placeholder*="email" i]'];
+    for (const s of sels) {
+        const el = document.querySelector(s);
+        if (el && el.offsetParent !== null) return el;
+    }
+    return document.querySelector('input[type="email"]');
+}
 const findPwd = () => [...document.querySelectorAll('input[type="password"]')].find(el => el.offsetParent !== null) || null;
 
 function findCodeInp() {
@@ -429,8 +584,7 @@ function findProfile() {
 const genAge = () => Math.floor(Math.random() * 21) + 25;
 const genName = () => ['Alex','Emma','James','Sophia','Michael','Olivia'][~~(Math.random()*6)];
 function genPwd() {
-    const c = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789',
-          s = '!@#$%&*';
+    const c = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789', s = '!@#$%&*';
     let p = '';
     for (let i = 0; i < 14; i++) p += c[~~(Math.random() * c.length)];
     return p + s[~~(Math.random()*s.length)] + ~~(Math.random()*10);
@@ -512,9 +666,15 @@ function showHelp() {
 <li>Скрипт: создаст почту → введёт email → дождётся кода → введёт код → при необходимости создаст пароль → заполнит профиль.</li>
 <li>Если авто-переход не сработал — появится кнопка «Продолжить».</li>
 <li>Пароль показывается в уведомлении.</li></ol></div>
-<div>
+<div style="margin-bottom:22px">
 <h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600">📋 Контекст</h3>
-<p style="margin:0;color:var(--gmut);font-size:13px">☰ → Копировать контекст → выход → новая регистрация → ☰ → Вставить контекст.</p></div></div>`;
+<p style="margin:0;color:var(--gmut);font-size:13px">☰ → Копировать контекст → выход → новая регистрация → ☰ → Вставить контекст.</p></div>
+<div>
+<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600">🔧 Диагностика</h3>
+<p style="margin:0 0 6px 0;color:var(--gmut);font-size:13px">
+<b style="color:var(--gfg)">Тумблер «Диагностика»</b> в меню включает подробный лог.<br>
+<b style="color:var(--gfg)">«Скопировать отчёт»</b> — собирает состояние, DOM и логи в один текст.</p>
+<p style="margin:0;color:var(--gmut);font-size:12px">Отчёт вставьте в чат для разбора проблемы.</p></div></div>`;
     helpModal.appendChild(m);
     document.body.appendChild(helpModal);
     m.querySelector('#ch').onclick = () => { helpModal.remove(); helpModal = null; };
@@ -531,6 +691,8 @@ const ICO_REG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" str
 const ICO_CONT = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
 const ICO_SET = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
 const ICO_HELP = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
+const ICO_REPORT = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="18" x2="13" y2="18"/><line x1="9" y1="12" x2="13" y2="12"/></svg>`;
+const ICO_DEBUG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`;
 
 function setStatus(t, c) {
     if (!statusLbl) return;
@@ -538,29 +700,27 @@ function setStatus(t, c) {
     statusLbl.style.color = c || 'var(--gfg)';
 }
 
-// Поиск логотипа ChatGPT для позиционирования
 function findLogo() {
     for (const s of ['[data-sidebar-blossom]', 'a[href="https://chatgpt.com"] svg',
-                     '._wordmarkLink_xjnzp_1', 'a[href="/"] svg', 'header svg']) {
+                     '._wordmarkLink_xjnzp_1', 'header svg']) {
         const el = document.querySelector(s);
         if (el && el.getBoundingClientRect().width > 0) return el;
     }
     return null;
 }
+
+let lastPos = null;
 function posMenu() {
     if (!menuBtn) return;
     const isMob = innerWidth < 768;
-    const logo = findLogo();
     let left = isMob ? 56 : 64;
+    const logo = findLogo();
     if (logo) {
         const r = logo.getBoundingClientRect();
         if (r.width > 0 && r.right > 0) left = Math.round(r.right + 8);
-        if (C.shift && !logo.dataset.gptShift) {
-            logo.dataset.gptShift = '1';
-            logo.style.transition = 'margin-left .25s cubic-bezier(.16,1,.3,1)';
-            logo.style.marginLeft = (isMob ? 60 : 70) + 'px';
-        }
     }
+    if (lastPos === left) return;
+    lastPos = left;
     menuBtn.style.left = left + 'px';
     if (menuPnl) menuPnl.style.left = left + 'px';
     if (statusLbl) statusLbl.style.left = left + 'px';
@@ -625,6 +785,29 @@ async function pasteCtx() {
     closeMenu();
 }
 
+function mkDebugToggle(delay = 0) {
+    const b = document.createElement('button');
+    b.id = 'gdbg';
+    b.className = 'gpt-mi';
+    b.style.cssText = `display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:transparent;color:var(--gfg);border:none;border-radius:10px;cursor:pointer;font-weight:500;text-align:left;animation-delay:${delay}ms;gap:12px`;
+    const render = () => `
+<span style="display:inline-flex;align-items:center">
+<span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;margin-right:8px;opacity:.85">${ICO_DEBUG}</span>
+<span style="font-size:14px">Диагностика</span></span>
+<span style="position:relative;width:38px;height:22px;background:${C.debug ? 'var(--gfg)' : '#8e8e8e'};border-radius:999px;flex-shrink:0;transition:background .2s var(--gease)">
+<span style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s var(--gease);box-shadow:0 1px 3px rgba(0,0,0,.3);transform:translateX(${C.debug ? '16px' : '0'})"></span></span>`;
+    b.innerHTML = render();
+    b.onclick = async e => {
+        e.stopPropagation();
+        C.debug = !C.debug;
+        await save('debug', C.debug);
+        b.innerHTML = render();
+        log('INFO', 'debug', 'diagnostics ' + (C.debug ? 'ENABLED' : 'disabled'));
+        notify('Диагностика ' + (C.debug ? 'включена' : 'выключена'), 'info', 2500);
+    };
+    return b;
+}
+
 function createMenu() {
     if (menuBtn || !document.body) return;
     menuBtn = document.createElement('button');
@@ -657,8 +840,10 @@ function createMenu() {
     menuPnl.appendChild(mkBtn('gc', ICO_CONT, 'Продолжить', () => { closeMenu(); setCanContinue(false); running = false; runStage(); }, 40, 'gpt-cont'));
     menuPnl.appendChild(mkBtn('gcp', ICO_COPY, 'Копировать контекст', copyCtx, 80));
     menuPnl.appendChild(mkBtn('gps', ICO_PASTE, 'Вставить контекст', pasteCtx, 120));
-    menuPnl.appendChild(mkBtn('gset', ICO_SET, 'Настройки', () => { closeMenu(); openSettings(); }, 160));
-    menuPnl.appendChild(mkBtn('ghlp', ICO_HELP, 'Помощь', () => { closeMenu(); showHelp(); }, 200));
+    menuPnl.appendChild(mkDebugToggle(160));
+    menuPnl.appendChild(mkBtn('grep', ICO_REPORT, 'Скопировать отчёт', () => { closeMenu(); copyReport(); }, 200));
+    menuPnl.appendChild(mkBtn('gset', ICO_SET, 'Настройки', () => { closeMenu(); openSettings(); }, 240));
+    menuPnl.appendChild(mkBtn('ghlp', ICO_HELP, 'Помощь', () => { closeMenu(); showHelp(); }, 280));
 
     document.body.appendChild(menuBtn);
     document.body.appendChild(menuPnl);
@@ -666,7 +851,7 @@ function createMenu() {
 
     posMenu();
     addEventListener('resize', posMenu);
-    new MutationObserver(posMenu).observe(document.body, { childList: true, subtree: true });
+    setInterval(posMenu, 1000);
     document.addEventListener('click', e => {
         if (menuPnl && menuPnl.style.display === 'flex' &&
             !menuPnl.contains(e.target) && !menuBtn.contains(e.target)) closeMenu();
@@ -891,22 +1076,28 @@ function detect() {
 async function runStage() {
     if (running || regDone) return;
     running = true;
+    const s = detect();
+    log('INFO', 'stage', '→ ' + s);
     try {
-        const s = detect();
         if (s === 'main') await stageMain();
         else if (s === 'login') await stageLogin();
         else if (s === 'verify') await stageVerify();
         else if (s === 'pwd') await stagePwd();
         else if (s === 'profile') await stageProfile();
-    } catch (e) { notify(`Ошибка: ${e.message}`, 'err'); }
+    } catch (e) {
+        log('ERROR', 'stage', s + ': ' + e.message);
+        notify(`Ошибка: ${e.message}`, 'err');
+    }
     running = false;
+    log('DEBUG', 'stage', '← ' + s + ' done');
 }
 
 async function startReg() {
-    if (running) return;
+    log('INFO', 'startReg', 'called');
+    if (running) { log('WARN', 'startReg', 'already running'); return; }
     if (regDone) return notify('Уже зарегистрировано', 'info', 3000);
-    if (loggedIn()) return notify('Вы авторизованы. Выйдите.', 'warn', 6000);
-    if (!await ensureKeys()) return notify('Настройка отменена', 'warn', 4000);
+    if (loggedIn()) { log('WARN', 'startReg', 'user logged in'); return notify('Вы авторизованы. Выйдите.', 'warn', 6000); }
+    if (!await ensureKeys()) { log('WARN', 'startReg', 'no keys'); return notify('Настройка отменена', 'warn', 4000); }
 
     setStatus('Старт');
     loginTried = false; verifyDone = false; codeDone = false; pwdDone = false;
@@ -931,32 +1122,38 @@ async function init() {
     try {
         await waitBody();
         injectCSS();
+        log('INFO', 'init', 'started, url=' + location.href);
 
         C.amKey = (await load('amKey')) || '';
         C.slKey = (await load('slKey')) || '';
         C.mode = (await load('mode')) || 'agentmail';
+        C.debug = (await load('debug')) || false;
         codeReqAt = await load('codeReqAt');
         ((await load('usedIds')) || []).forEach(id => usedIds.add(id));
         ctx = await load('ctx');
         inbox = await load('inbox');
+        log('INFO', 'init', 'loaded: mode=' + C.mode + ' debug=' + C.debug + ' amKey=' + (C.amKey ? 'yes' : 'no'));
 
         const comp = await load('complete');
-        if (comp && loggedIn()) { regDone = true; notifyDone = true; }
+        if (comp && loggedIn()) { regDone = true; notifyDone = true; log('INFO', 'init', 'regDone restored'); }
         else if (comp && !loggedIn()) { await save('complete', null); regDone = false; }
 
         createMenu();
+        log('INFO', 'init', 'menu created');
 
         let lastUrl = location.href;
         setInterval(() => {
             if (location.href !== lastUrl) {
+                log('INFO', 'url', lastUrl + ' → ' + location.href);
                 lastUrl = location.href;
                 if (menuVis) updateMenu();
             }
         }, 1000);
 
         inited = true;
+        log('INFO', 'init', 'done');
     } catch (e) {
-        console.error('[CG]', e);
+        log('ERROR', 'init', e);
         notify(`Ошибка init: ${e.message}`, 'err', 10000);
     }
 }
