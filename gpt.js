@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT + Grok Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      82.1
-// @description  Авторегистрация ChatGPT и Grok через AgentMail.to / SimpleLogin + вкладки настроек + диагностика
+// @version      82.2
+// @description  Авторегистрация ChatGPT и Grok через AgentMail.to / SimpleLogin + расширенная диагностика Grok
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://auth.openai.com/*
@@ -37,7 +37,6 @@ let codeDone = false, profileDone = false, regDone = false,
     helpModal = null, settingsModal = null, ctx = null,
     notifyDone = false, canContinue = false, profileNotified = false;
 
-// --- Состояние Grok (изолировано от ChatGPT) ---
 const GS = {
     emailDone: false, codeDone: false, profileDone: false, regDone: false,
     running: false, polling: false,
@@ -61,7 +60,7 @@ const isGrok = () => location.hostname.includes('accounts.x.ai');
 const isChatGPT = () => !isGrok();
 
 // ═══════════════════ ДИАГНОСТИКА ═══════════════════
-const LOG_MAX = 500;
+const LOG_MAX = 800;
 const logBuf = [];
 let diagErrors = [];
 
@@ -84,10 +83,10 @@ function log(level, tag, ...args) {
     if (logBuf.length > LOG_MAX) logBuf.shift();
     if (level === 'ERROR') {
         diagErrors.push(line);
-        if (diagErrors.length > 100) diagErrors.shift();
+        if (diagErrors.length > 150) diagErrors.shift();
     }
     if (logBuf.length % 10 === 0 || level === 'ERROR') {
-        GM.setValue('cg_logs', logBuf.slice(-200)).catch(() => {});
+        GM.setValue('cg_logs', logBuf.slice(-300)).catch(() => {});
     }
     console.log(line);
 }
@@ -99,21 +98,115 @@ addEventListener('unhandledrejection', e => {
     log('ERROR', 'promise', e.reason?.message || String(e.reason));
 });
 
+// ─── Расширенный дамп DOM для Grok ───
+function dumpGrokDOM() {
+    const out = [];
+    const push = (label, val) => out.push(label + ': ' + val);
+
+    push('--- GROK DOM DUMP ---', '');
+    push('URL', location.href);
+    push('readyState', document.readyState);
+    push('body.childElementCount', document.body ? document.body.childElementCount : 'no body');
+    push('html.lang', document.documentElement.lang);
+    push('html.class', document.documentElement.className);
+
+    // Видимые input'ы
+    const inputs = [...document.querySelectorAll('input')];
+    push('inputs.total', inputs.length);
+    inputs.slice(0, 30).forEach((el, i) => {
+        const r = el.getBoundingClientRect();
+        const vis = el.offsetParent !== null || (r.width > 0 && r.height > 0);
+        push(`input[${i}]`, JSON.stringify({
+            id: el.id, name: el.name, type: el.type,
+            maxlength: el.getAttribute('maxlength'),
+            autocomplete: el.getAttribute('autocomplete'),
+            placeholder: el.placeholder,
+            inputmode: el.getAttribute('inputmode'),
+            ariaLabel: el.getAttribute('aria-label'),
+            visible: vis, value: (el.value || '').slice(0, 20),
+            rect: { w: Math.round(r.width), h: Math.round(r.height), x: Math.round(r.x), y: Math.round(r.y) }
+        }));
+    });
+
+    // Видимые кнопки
+    const btns = [...document.querySelectorAll('button, a[role="button"], div[role="button"], input[type="submit"]')];
+    push('buttons.total', btns.length);
+    btns.slice(0, 40).forEach((el, i) => {
+        const r = el.getBoundingClientRect();
+        const vis = el.offsetParent !== null || (r.width > 0 && r.height > 0);
+        push(`button[${i}]`, JSON.stringify({
+            tag: el.tagName, type: el.type || null,
+            text: (el.textContent || '').trim().slice(0, 60),
+            ariaLabel: el.getAttribute('aria-label'),
+            dataTestId: el.getAttribute('data-testid'),
+            visible: vis,
+            rect: { w: Math.round(r.width), h: Math.round(r.height) }
+        }));
+    });
+
+    // Формы
+    const forms = [...document.querySelectorAll('form')];
+    push('forms.total', forms.length);
+    forms.slice(0, 10).forEach((el, i) => {
+        push(`form[${i}]`, JSON.stringify({
+            action: el.action, method: el.method,
+            inputs: el.querySelectorAll('input').length,
+            buttons: el.querySelectorAll('button').length
+        }));
+    });
+
+    // iframe (Turnstile)
+    const iframes = [...document.querySelectorAll('iframe')];
+    push('iframes.total', iframes.length);
+    iframes.slice(0, 10).forEach((el, i) => {
+        push(`iframe[${i}]`, JSON.stringify({
+            src: (el.src || '').slice(0, 120),
+            id: el.id, name: el.name,
+            visible: el.offsetParent !== null
+        }));
+    });
+
+    // Turnstile-специфика
+    push('turnstile.response input', !!document.querySelector('input[name="cf-turnstile-response"]'));
+    push('turnstile.div[data-sitekey]', !!document.querySelector('div[data-sitekey]'));
+    push('turnstile.iframe', !!document.querySelector('iframe[src*="challenges.cloudflare.com"]'));
+
+    // Текст body (первые 600 символов, склеенный)
+    const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+    push('body.innerText (600)', bodyText);
+
+    // Заголовки h1/h2
+    [...document.querySelectorAll('h1, h2')].slice(0, 5).forEach((el, i) => {
+        push(`heading[${i}]`, (el.textContent || '').trim().slice(0, 100));
+    });
+
+    // Shadow roots (если есть)
+    const all = [...document.querySelectorAll('*')];
+    const withShadow = all.filter(el => el.shadowRoot).slice(0, 5);
+    push('shadowRoots.total', withShadow.length);
+    withShadow.forEach((el, i) => {
+        push(`shadow[${i}]`, el.tagName + '#' + el.id + '.' + (el.className || '').slice(0, 40));
+    });
+
+    push('--- END DUMP ---', '');
+    return out.join('\n');
+}
+
 async function buildReport() {
     const p = [];
     p.push('═══ AUTO REGISTER — ОТЧЁТ (ChatGPT + Grok) ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия скрипта: 82.1');
+    p.push('Версия скрипта: 82.2');
     p.push('URL: ' + location.href);
     p.push('Host: ' + location.hostname);
     p.push('Path: ' + location.pathname);
     p.push('Сайт: ' + (isGrok() ? 'Grok (accounts.x.ai)' : 'ChatGPT'));
+    p.push('readyState: ' + document.readyState);
     p.push('User Agent: ' + navigator.userAgent);
     p.push('Платформа: ' + navigator.platform + ' | Mobile: ' + (innerWidth < 768));
     p.push('Окно: ' + innerWidth + '×' + innerHeight);
     p.push('');
 
-    // --- ChatGPT-состояние ---
     p.push('─── СОСТОЯНИЕ CHATGPT ───');
     p.push('running: ' + running);
     p.push('regDone: ' + regDone);
@@ -121,32 +214,23 @@ async function buildReport() {
     p.push('codeDone: ' + codeDone);
     p.push('pwdDone: ' + pwdDone);
     p.push('profileDone: ' + profileDone);
-    p.push('profileNotified: ' + profileNotified);
     p.push('polling: ' + polling);
     p.push('canContinue: ' + canContinue);
-    p.push('notifyDone: ' + notifyDone);
     p.push('loginTried: ' + loginTried);
     p.push('inbox: ' + JSON.stringify(inbox));
     p.push('codeReqAt: ' + (codeReqAt ? new Date(codeReqAt).toISOString() : null));
-    p.push('usedIds: ' + usedIds.size);
     p.push('');
+
     p.push('─── ПРОВЕРКА ПОЧТЫ (ChatGPT) ───');
     p.push('inboxId: ' + verifyStats.inboxId);
     p.push('inboxEmail: ' + verifyStats.inboxEmail);
     p.push('attempts: ' + verifyStats.attempts);
     p.push('lastReason: ' + verifyStats.lastReason);
-    p.push('lastMsgCount: ' + verifyStats.lastMsgCount);
     p.push('lastCode: ' + verifyStats.lastCode);
-    p.push('lastCodeAge: ' + verifyStats.lastCodeAge);
-    p.push('fillAttempts: ' + verifyStats.fillAttempts);
-    p.push('fillSuccess: ' + verifyStats.fillSuccess);
     p.push('lastApiStatus: ' + verifyStats.lastApiStatus);
     p.push('lastApiError: ' + verifyStats.lastApiError);
-    p.push('codeReqTime: ' + (verifyStats.codeReqTime ? new Date(verifyStats.codeReqTime).toISOString() : null));
-    p.push('firstMsgTime: ' + (verifyStats.firstMsgTime ? new Date(verifyStats.firstMsgTime).toISOString() : null));
     p.push('');
 
-    // --- Grok-состояние ---
     p.push('─── СОСТОЯНИЕ GROK ───');
     p.push('grokEnabled: ' + C.grokEnabled);
     p.push('GS.running: ' + GS.running);
@@ -160,68 +244,59 @@ async function buildReport() {
     p.push('GS.lastCode: ' + GS.lastCode);
     p.push('GS.detectedStage: ' + GS.detectedStage);
     p.push('GS.turnstileSolved: ' + GS.turnstileSolved);
-    p.push('GS.turnstileWaitStart: ' + (GS.turnstileWaitStart ? new Date(GS.turnstileWaitStart).toISOString() : null));
     p.push('GS.inbox: ' + JSON.stringify(GS.inbox));
     p.push('GS.codeReqAt: ' + (GS.codeReqAt ? new Date(GS.codeReqAt).toISOString() : null));
-    p.push('GS.usedIds: ' + GS.usedIds.size);
     p.push('');
 
     p.push('─── КОНФИГ ───');
     p.push('mode: ' + C.mode);
     p.push('slRelay: ' + (C.slRelay || 'не задан'));
     p.push('debug: ' + C.debug);
-    p.push('fast: ' + C.fast);
-    p.push('shift: ' + C.shift);
     p.push('amKey: ' + (C.amKey ? C.amKey.slice(0, 8) + '…(' + C.amKey.length + ')' : 'нет'));
     p.push('slKey: ' + (C.slKey ? C.slKey.slice(0, 8) + '…(' + C.slKey.length + ')' : 'нет'));
     p.push('');
 
     p.push('─── DOM (общий) ───');
     p.push('detect(): ' + detect());
-    p.push('');
-
-    // --- ChatGPT DOM ---
-    p.push('─── DOM (ChatGPT) ───');
-    p.push('findEmail(): ' + (findEmail() ? 'есть' : 'нет'));
-    p.push('findPwd(): ' + (findPwd() ? 'есть' : 'нет'));
-    p.push('findCodeInp(): ' + (findCodeInp() ? 'есть' : 'нет'));
-    const codes = findCodes();
-    p.push('findCodes(): ' + (codes ? (codes.type === 'otp' ? 'OTP (' + codes.inputs.length + ' полей)' : 'single') : 'нет'));
-    p.push('hasVerifyText(): ' + hasVerifyText());
-    const prof = findProfile();
-    p.push('findProfile().name: ' + (prof.name ? 'есть' : 'нет'));
-    p.push('findProfile().age: ' + (prof.age ? 'есть' : 'нет'));
-    p.push('hasLoginBtn: ' + hasLoginBtn());
-    p.push('loggedIn: ' + loggedIn());
     p.push('menuBtn.left: ' + (menuBtn ? menuBtn.style.left : 'нет'));
     p.push('menuBtn.right: ' + (menuBtn ? menuBtn.style.right : 'нет'));
-    p.push('account: ' + currentAccountId());
     p.push('');
 
-    // --- Grok DOM ---
-    p.push('─── DOM (Grok) ───');
-    p.push('GR.findEmail(): ' + (GR.findEmail() ? 'есть' : 'нет'));
-    p.push('GR.findCode(): ' + (GR.findCode() ? 'есть' : 'нет'));
-    p.push('GR.findGivenName(): ' + (GR.findGivenName() ? 'есть' : 'нет'));
-    p.push('GR.findFamilyName(): ' + (GR.findFamilyName() ? 'есть' : 'нет'));
-    p.push('GR.findPwd(): ' + (GR.findPwd() ? 'есть' : 'нет'));
-    p.push('GR.findSubmit(): ' + (GR.findSubmit() ? 'есть' : 'нет'));
-    p.push('GR.findBack(): ' + (GR.findBack() ? 'есть' : 'нет'));
-    p.push('GR.hasTurnstile(): ' + GR.hasTurnstile());
-    p.push('GR.turnstileSolved(): ' + GR.turnstileSolved());
-    p.push('GR.hasGrokLogo(): ' + !!document.querySelector('a[title*="SpaceXAI"]'));
-    p.push('GR.hasEmailText(): ' + GR.hasEmailText());
-    p.push('GR.hasCodeText(): ' + GR.hasCodeText());
-    p.push('GR.hasProfileText(): ' + GR.hasProfileText());
-    p.push('');
+    if (isGrok()) {
+        p.push('─── DOM (Grok, ручная проверка селекторов) ───');
+        p.push('GR.findEmail(): ' + (GR.findEmail() ? 'есть' : 'нет'));
+        p.push('GR.findCode(): ' + (GR.findCode() ? 'есть' : 'нет'));
+        p.push('GR.findGivenName(): ' + (GR.findGivenName() ? 'есть' : 'нет'));
+        p.push('GR.findFamilyName(): ' + (GR.findFamilyName() ? 'есть' : 'нет'));
+        p.push('GR.findPwd(): ' + (GR.findPwd() ? 'есть' : 'нет'));
+        p.push('GR.findSubmit(): ' + (GR.findSubmit() ? 'есть' : 'нет'));
+        p.push('GR.hasTurnstile(): ' + GR.hasTurnstile());
+        p.push('GR.turnstileSolved(): ' + GR.turnstileSolved());
+        p.push('GR.hasEmailText(): ' + GR.hasEmailText());
+        p.push('GR.hasCodeText(): ' + GR.hasCodeText());
+        p.push('GR.hasProfileText(): ' + GR.hasProfileText());
+        p.push('GR.detectStage(): ' + GR.detectStage());
+        p.push('');
+        p.push('─── GROK DOM DUMP ───');
+        p.push(dumpGrokDOM());
+        p.push('');
+    } else {
+        p.push('─── DOM (ChatGPT) ───');
+        p.push('findEmail(): ' + (findEmail() ? 'есть' : 'нет'));
+        p.push('findPwd(): ' + (findPwd() ? 'есть' : 'нет'));
+        p.push('findCodes(): ' + (findCodes() ? 'есть' : 'нет'));
+        p.push('hasVerifyText(): ' + hasVerifyText());
+        p.push('loggedIn(): ' + loggedIn());
+        p.push('');
+    }
 
     p.push('─── ОШИБКИ (' + diagErrors.length + ') ───');
     if (!diagErrors.length) p.push('(нет)');
-    else diagErrors.slice(-20).forEach(e => p.push(e));
+    else diagErrors.slice(-30).forEach(e => p.push(e));
     p.push('');
     p.push('─── ЛОГ (' + logBuf.length + ') ───');
     if (!logBuf.length) p.push('(пусто)');
-    else logBuf.slice(-200).forEach(l => p.push(l));
+    else logBuf.slice(-300).forEach(l => p.push(l));
     p.push('');
     p.push('═══ КОНЕЦ ОТЧЁТА ═══');
     return p.join('\n');
@@ -244,13 +319,13 @@ function showReportModal(report, copied) {
     ov.style.cssText = 'position:fixed;inset:0;background:var(--govl);z-index:9999999;display:flex;align-items:center;justify-content:center;animation:gFd .2s var(--gease) both';
     const m = document.createElement('div');
     m.className = 'gpt-gl';
-    m.style.cssText = 'padding:20px;border-radius:20px;max-width:720px;width:92%;max-height:85vh;display:flex;flex-direction:column;color:var(--gfg);animation:gIn .3s var(--gease) both';
+    m.style.cssText = 'padding:20px;border-radius:20px;max-width:820px;width:94%;max-height:90vh;display:flex;flex-direction:column;color:var(--gfg);animation:gIn .3s var(--gease) both';
     m.innerHTML = `
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
 <h2 style="margin:0;font-size:17px;font-weight:600">Отчёт диагностики</h2>
 <button id="grmc" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--gmut);padding:0 5px">×</button></div>
-<p style="margin:0 0 10px 0;font-size:12px;color:var(--gmut)">${copied ? '✓ Скопировано в буфер.' : '⚠ Буфер недоступен.'}</p>
-<textarea id="grmt" readonly style="flex:1;min-height:400px;width:100%;padding:12px;border-radius:10px;border:1px solid var(--gbd);background:var(--gelev);color:var(--gfg);font-family:ui-monospace,monospace;font-size:11px;line-height:1.4;resize:vertical;box-sizing:border-box">${report.replace(/</g, '<')}</textarea>
+<p style="margin:0 0 10px 0;font-size:12px;color:var(--gmut)">${copied ? '✓ Скопировано в буфер.' : '⚠ Буфер недоступен.'} Размер: ${report.length} симв.</p>
+<textarea id="grmt" readonly style="flex:1;min-height:480px;width:100%;padding:12px;border-radius:10px;border:1px solid var(--gbd);background:var(--gelev);color:var(--gfg);font-family:ui-monospace,monospace;font-size:11px;line-height:1.4;resize:vertical;box-sizing:border-box">${report.replace(/</g, '<')}</textarea>
 <div style="display:flex;gap:10px;margin-top:12px">
 <button id="grmc2" style="flex:1;padding:12px;background:var(--gacc);color:var(--gaccf);border:none;border-radius:999px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit">Скопировать снова</button>
 <button id="grmclr" style="padding:12px 20px;background:transparent;color:var(--gdngr);border:1px solid var(--gbd);border-radius:999px;font-size:14px;cursor:pointer;font-family:inherit">Очистить логи</button>
@@ -461,8 +536,7 @@ function openSettings() {
 <div style="height:12px"></div>
 <label class="gpt-lbl">AgentMail email для проверки <span style="color:var(--gmut)">*</span></label>
 <input id="slemail" class="gpt-in" type="email" placeholder="relay@agentmail.to" autocomplete="off">
-<p class="gpt-hint">Адрес постоянного inbox, привязанного в SimpleLogin → Mailboxes.<br>
-<span style="opacity:.8">Не удаляйте этот ящик — иначе алиасы SimpleLogin перестанут работать.</span></p></div>
+<p class="gpt-hint">Адрес постоянного inbox, привязанного в SimpleLogin → Mailboxes.</p></div>
 <div style="height:14px"></div>
 <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:var(--gelev);border-radius:12px">
 <span style="font-size:13px;color:var(--gfg)">Включить Grok (accounts.x.ai)</span>
@@ -477,20 +551,10 @@ function openSettings() {
 <span id="gsw" style="position:relative;width:38px;height:22px;background:${C.debug ? 'var(--gfg)' : '#8e8e8e'};border-radius:999px;flex-shrink:0;cursor:pointer;transition:background .2s var(--gease)">
 <span style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s var(--gease);box-shadow:0 1px 3px rgba(0,0,0,.3);transform:translateX(${C.debug ? '16px' : '0'})"></span></span></div>
 <button id="grepBtn" style="width:100%;padding:12px;background:var(--gelev);color:var(--gfg);border:1px solid var(--gbd);border-radius:999px;font-size:13px;cursor:pointer;font-family:inherit;margin-bottom:12px">Скопировать отчёт</button>
-<p style="color:var(--gmut);font-size:12px;margin:0 0 8px 0">Текущее состояние:</p>
+<button id="gdumpBtn" style="width:100%;padding:12px;background:var(--gelev);color:var(--gfg);border:1px solid var(--gbd);border-radius:999px;font-size:13px;cursor:pointer;font-family:inherit;margin-bottom:12px">Дамп Grok DOM в консоль</button>
+<p style="color:var(--gmut);font-size:12px;margin:0 0 8px 0">Live-состояние:</p>
 <div style="background:var(--gelev);padding:10px 12px;border-radius:10px;font-family:ui-monospace,monospace;font-size:11px;color:var(--gmut);line-height:1.6;white-space:pre-wrap">сайт: ${isGrok() ? 'Grok' : 'ChatGPT'}
 stage: ${detect()}
-
-— ChatGPT —
-running: ${running}
-regDone: ${regDone}
-verifyDone: ${verifyDone}
-codeDone: ${codeDone}
-pwdDone: ${pwdDone}
-polling: ${polling}
-attempts: ${verifyStats.attempts}
-lastReason: ${verifyStats.lastReason || '—'}
-inbox: ${inbox?.email || '—'}
 
 — Grok —
 GS.running: ${GS.running}
@@ -500,8 +564,12 @@ GS.profileDone: ${GS.profileDone}
 GS.regDone: ${GS.regDone}
 GS.attempts: ${GS.attempts}
 GS.lastReason: ${GS.lastReason || '—'}
+GS.detectedStage: ${GS.detectedStage}
 GS.turnstileSolved: ${GS.turnstileSolved}
-GS.inbox: ${GS.inbox?.email || '—'}</div>
+inputs: ${document.querySelectorAll('input').length}
+buttons: ${document.querySelectorAll('button').length}
+forms: ${document.querySelectorAll('form').length}
+iframes: ${document.querySelectorAll('iframe').length}</div>
 <p style="color:var(--gmut);font-size:11px;margin:12px 0 0 0">Логи также видны в консоли браузера.</p>
 </div>
 
@@ -539,9 +607,6 @@ GS.inbox: ${GS.inbox?.email || '—'}</div>
             amL.innerHTML = isS
                 ? 'AgentMail API Key <span style="color:var(--gmut)">* (relay)</span>'
                 : 'AgentMail API Key <span style="color:var(--gmut)">*</span>';
-            amH.innerHTML = isS
-                ? 'console.agentmail.to → API Keys'
-                : 'console.agentmail.to → API Keys → Create';
         };
         upd();
         btns.forEach(b => b.onclick = () => { mode = b.dataset.m; upd(); });
@@ -553,7 +618,6 @@ GS.inbox: ${GS.inbox?.email || '—'}</div>
             const dot = sw.firstElementChild;
             sw.style.background = C.debug ? 'var(--gfg)' : '#8e8e8e';
             dot.style.transform = 'translateX(' + (C.debug ? '16px' : '0') + ')';
-            log('INFO', 'debug', 'diagnostics ' + (C.debug ? 'ENABLED' : 'disabled'));
             notify('Диагностика ' + (C.debug ? 'включена' : 'выключена'), 'info', 2500);
         };
 
@@ -581,7 +645,6 @@ GS.inbox: ${GS.inbox?.email || '—'}</div>
             await save('slRelay', relay || null);
             await save('mode', mode);
             C.amKey = ak; C.slKey = sk; C.slRelay = relay; C.mode = mode;
-            log('INFO', 'settings', 'saved mode=' + mode + ' relay=' + relay);
             notify('Настройки сохранены', 'ok', 3000);
             close(true);
         };
@@ -596,6 +659,14 @@ GS.inbox: ${GS.inbox?.email || '—'}</div>
             settingsModal = null;
             copyReport();
         };
+        d.querySelector('#gdumpBtn').onclick = () => {
+            const dump = dumpGrokDOM();
+            console.log(dump);
+            try {
+                if (typeof GM_setClipboard !== 'undefined') GM_setClipboard(dump, 'text');
+            } catch {}
+            notify('Дамп Grok DOM скопирован (см. консоль)', 'ok', 4000);
+        };
 
         setTimeout(() => am.focus(), 100);
     });
@@ -609,7 +680,7 @@ async function ensureKeys() {
         C.slRelay = (await load('slRelay')) || '';
         C.mode = (await load('mode')) || 'agentmail';
         const ge = await load('grokEnabled');
-        if (ge !== null) C.grokEnabled = ge;
+        if (ge === false) C.grokEnabled = false;
         return true;
     }
     return !!(await openSettings());
@@ -639,7 +710,6 @@ async function createInbox() {
         const inboxObj = { id: d.inbox_id, email: d.inbox_id || d.email, username };
         verifyStats.inboxId = inboxObj.id;
         verifyStats.inboxEmail = inboxObj.email;
-        log('INFO', 'inbox', 'created: ' + JSON.stringify(inboxObj));
         return inboxObj;
     } catch { return null; }
 }
@@ -708,36 +778,24 @@ async function findCode() {
     if (!inbox?.id) { log('WARN', 'findCode', 'no inbox.id'); return { found: false, reason: 'no_inbox' }; }
     const msgs = await listMsgs(inbox.id);
     if (msgs?.__rate) { log('WARN', 'findCode', 'rate limited'); return { found: false, reason: 'rate_limited' }; }
-    if (!msgs) { log('ERROR', 'findCode', 'listMsgs null (API error)'); return { found: false, reason: 'api_error' }; }
-    if (!msgs.length) { log('DEBUG', 'findCode', 'no messages yet'); return { found: false, reason: 'no_messages' }; }
+    if (!msgs) { return { found: false, reason: 'api_error' }; }
+    if (!msgs.length) { return { found: false, reason: 'no_messages' }; }
 
     msgs.sort((a, b) => msgTime(b) - msgTime(a));
     if (!verifyStats.firstMsgTime) verifyStats.firstMsgTime = msgTime(msgs[0]);
     verifyStats.lastMsgCount = msgs.length;
 
     const fresh = msgs.filter(isFresh);
-    log('DEBUG', 'findCode', `msgs=${msgs.length} fresh=${fresh.length} usedIds=${usedIds.size} codeReqAt=${codeReqAt ? new Date(codeReqAt).toISOString() : 'null'}`);
-
-    if (!fresh.length) {
-        const newest = msgTime(msgs[0]);
-        log('DEBUG', 'findCode', `no fresh. newest=${new Date(newest).toISOString()} codeReqAt=${new Date(codeReqAt).toISOString()} diff=${(newest - codeReqAt)/1000}s`);
-        return { found: false, reason: 'waiting', count: msgs.length };
-    }
+    if (!fresh.length) return { found: false, reason: 'waiting', count: msgs.length };
 
     for (const m of fresh) {
-        if (usedIds.has(m.message_id)) {
-            log('DEBUG', 'findCode', `skip used: ${m.message_id}`);
-            continue;
-        }
+        if (usedIds.has(m.message_id)) continue;
         const full = (await getMsg(inbox.id, m.message_id)) || m;
         const code = extractCode(full);
         if (code) {
-            log('INFO', 'findCode', `FOUND code=${code} msgId=${m.message_id} subject="${(full.subject||'').slice(0,50)}"`);
             return { found: true, code, msgId: m.message_id, age: Math.max(0, Math.round((Date.now() - msgTime(m)) / 1000)) };
         }
-        log('DEBUG', 'findCode', `msg ${m.message_id}: no code. subject="${(full.subject||'').slice(0,80)}"`);
     }
-    log('DEBUG', 'findCode', `no code in ${fresh.length} fresh msgs`);
     return { found: false, reason: 'no_code', count: fresh.length };
 }
 
@@ -754,12 +812,6 @@ async function typeHuman(el, txt) {
     }
     await delay(50, 150);
     el.dispatchEvent(new Event('change', { bubbles: true }));
-}
-function fill(el, v) {
-    if (!el) return false;
-    focusEl(el); setVal(el, ''); setVal(el, v);
-    fireInput(el, v); el.dispatchEvent(new Event('change', { bubbles: true }));
-    return true;
 }
 function findEmail() {
     const sels = ['#mobile-auth-email', 'input[type="email"]', 'input[name="login_hint"]',
@@ -779,10 +831,6 @@ function findCodeInp() {
         const el = document.querySelector(s);
         if (el && el.offsetParent !== null) return el;
     }
-    for (const el of document.querySelectorAll('input[type="text"],input[type="tel"],input:not([type])')) {
-        const max = +(el.getAttribute('maxlength') || 0);
-        if (max === 6 || max === 0) return el;
-    }
     return null;
 }
 function findCodes() {
@@ -794,33 +842,20 @@ function findCodes() {
 async function fillCode(code) {
     verifyStats.fillAttempts++;
     const t = findCodes();
-    if (!t) {
-        log('ERROR', 'fillCode', 'поле для кода НЕ найдено');
-        log('DEBUG', 'fillCode', 'inputs: ' + [...document.querySelectorAll('input')].map(i => ({
-            id: i.id, name: i.name, type: i.type, max: i.getAttribute('maxlength'),
-            placeholder: i.placeholder, visible: i.offsetParent !== null
-        })).map(o => JSON.stringify(o)).join(' | '));
-        return false;
-    }
-    log('INFO', 'fillCode', 'type=' + t.type + ' code=' + code);
+    if (!t) return false;
     try {
         if (t.type === 'single') {
             await typeHuman(t.input, code);
-            log('INFO', 'fillCode', 'single filled, value=' + t.input.value);
         } else {
             for (let i = 0; i < t.inputs.length && i < code.length; i++) {
                 await focusEl(t.inputs[i]);
                 setVal(t.inputs[i], code[i]);
                 fireInput(t.inputs[i], code[i]);
             }
-            log('INFO', 'fillCode', 'otp filled, values=' + t.inputs.map(i => i.value).join(''));
         }
         verifyStats.fillSuccess++;
         return true;
-    } catch (e) {
-        log('ERROR', 'fillCode', e);
-        return false;
-    }
+    } catch (e) { return false; }
 }
 function findProfile() {
     const all = [...document.querySelectorAll('input')];
@@ -848,11 +883,9 @@ async function clickCont() {
     for (const b of document.querySelectorAll('button,a,div[role="button"]')) {
         const t = b.textContent.trim().toLowerCase();
         if (['continue','продолжить','next','далее','create','создать'].includes(t)) {
-            log('DEBUG', 'clickCont', 'found: "' + b.textContent.trim() + '"');
             return click(b);
         }
     }
-    log('WARN', 'clickCont', 'кнопка Continue не найдена');
     return false;
 }
 
@@ -871,16 +904,8 @@ function hasVerifyText() {
     return /Проверьте свою почту|Введите код подтверждения|Check your email|Enter the code|Enter verification/i.test(body);
 }
 
-function currentAccountId() {
-    const el = document.querySelector('[data-testid="user-menu"]') ||
-               document.querySelector('button[aria-label*="меню" i]') ||
-               document.querySelector('nav[aria-label="Боковая панель"] button[aria-label*="аккаунт" i]');
-    return el ? (el.textContent || '').trim().slice(0, 40) : 'unknown';
-}
-
 // ═══════════════════ GROK MODULE ═══════════════════
 const GR = {
-    // --- Поиск полей ---
     findEmail() {
         return document.querySelector('#email') ||
                document.querySelector('input[type="email"][name="email"]') ||
@@ -912,16 +937,13 @@ const GR = {
     },
     findSubmit() {
         const btns = [...document.querySelectorAll('button[type="submit"]')];
-        const priority = ['зарегистрироваться', 'подтвердить email', 'завершить регистрацию'];
+        const priority = ['зарегистрироваться', 'подтвердить email', 'завершить регистрацию', 'продолжить', 'далее'];
         for (const p of priority) {
             const b = btns.find(b => b.textContent.trim().toLowerCase().includes(p));
             if (b && b.offsetParent !== null) return b;
         }
+        // Fallback: любая видимая submit-кнопка
         return btns.find(b => b.offsetParent !== null) || null;
-    },
-    findBack() {
-        return [...document.querySelectorAll('button')].find(b =>
-            b.textContent.trim().toLowerCase().includes('назад') && b.offsetParent !== null) || null;
     },
     hasTurnstile() {
         return !!document.querySelector('input[name="cf-turnstile-response"]') ||
@@ -942,7 +964,7 @@ const GR = {
     },
     hasCodeText() {
         const t = document.body?.innerText || '';
-        return /Подтвердите ваш email|Verify your email|Enter the code|одноразовый код/i.test(t) || !!this.findCode();
+        return /Подтвердите ваш email|Verify your email|Enter the code|одноразовый код|введите код/i.test(t) || !!this.findCode();
     },
     hasProfileText() {
         const t = document.body?.innerText || '';
@@ -950,7 +972,6 @@ const GR = {
                (!!this.findGivenName() && !!this.findFamilyName() && !!this.findPwd());
     },
 
-    // --- Определение этапа ---
     detectStage() {
         if (this.hasProfileText()) return 'profile';
         if (this.hasCodeText()) return 'code';
@@ -958,7 +979,6 @@ const GR = {
         return 'unknown';
     },
 
-    // --- Действия ---
     async submitEmail(email) {
         const inp = this.findEmail();
         if (!inp) { notify('[GR] Поле email не найдено', 'err'); return false; }
@@ -966,13 +986,14 @@ const GR = {
         await typeHuman(inp, email);
         await delay(200, 500);
         const btn = this.findSubmit();
-        if (!btn) { notify('[GR] Кнопка "Зарегистрироваться" не найдена', 'err'); return false; }
+        if (!btn) { notify('[GR] Кнопка не найдена', 'err'); return false; }
         await click(btn);
         GS.emailDone = true;
         GS.codeReqAt = Date.now();
         await save('gr_inbox', GS.inbox);
         await save('gr_email', email);
         await save('gr_codeReqAt', GS.codeReqAt);
+        await save('gr_emailDone', true);
         return true;
     },
 
@@ -983,7 +1004,7 @@ const GR = {
         await typeHuman(inp, code);
         await delay(200, 500);
         const btn = this.findSubmit();
-        if (!btn) { notify('[GR] Кнопка "Подтвердить email" не найдена', 'err'); return false; }
+        if (!btn) { notify('[GR] Кнопка не найдена', 'err'); return false; }
         await click(btn);
         GS.codeDone = true;
         await save('gr_codeDone', true);
@@ -1000,7 +1021,6 @@ const GR = {
         await typeHuman(pi, password);
         await delay(200, 500);
 
-        // --- Turnstile ---
         if (this.hasTurnstile()) {
             if (!this.turnstileSolved()) {
                 notify('[GR] ⚠ Пройдите капчу Cloudflare Turnstile вручную', 'warn', 15000);
@@ -1024,7 +1044,7 @@ const GR = {
         }
 
         const btn = this.findSubmit();
-        if (!btn) { notify('[GR] Кнопка "Завершить регистрацию" не найдена', 'err'); return false; }
+        if (!btn) { notify('[GR] Кнопка не найдена', 'err'); return false; }
         await click(btn);
         GS.profileDone = true;
         await save('gr_profileDone', true);
@@ -1033,15 +1053,21 @@ const GR = {
         return true;
     },
 
-    // --- Главный цикл ---
     async run() {
         if (!C.grokEnabled) return;
         if (GS.running) return;
         const stage = this.detectStage();
         GS.detectedStage = stage;
         log('INFO', 'GR', 'run() stage=' + stage);
+
         if (stage === 'unknown') {
-            log('WARN', 'GR', 'unknown stage, skip');
+            // Диагностируем подробно, чтобы понять, что за страница
+            const dump = dumpGrokDOM();
+            log('WARN', 'GR', 'unknown stage. DOM dump:\n' + dump);
+            console.log('=== GROK UNKNOWN STAGE — DOM DUMP ===\n' + dump);
+            notify('[GR] Не понял этап. Скинь отчёт: ☰ → Настройки → Диагностика → Скопировать отчёт', 'warn', 12000);
+            // Покажем модалку с дампом
+            showReportModal(dump, false);
             return;
         }
         GS.running = true;
@@ -1050,9 +1076,9 @@ const GR = {
                 const email = await this.prepareEmail();
                 if (!email) { GS.running = false; return; }
                 await this.submitEmail(email);
-            } else if (stage === 'code' && GS.emailDone && !GS.codeDone) {
+            } else if (stage === 'code' && !GS.codeDone) {
                 await this.pollCode();
-            } else if (stage === 'profile' && GS.codeDone && !GS.profileDone) {
+            } else if (stage === 'profile' && !GS.profileDone) {
                 const pwd = genPwd();
                 const data = {
                     givenName: ['Alex','Emma','James','Sophia','Michael','Olivia'][~~(Math.random()*6)],
@@ -1063,6 +1089,8 @@ const GR = {
                 notify('[GR] 🔑 Пароль: ' + pwd, 'warn', 20000);
                 try { GM_setClipboard(pwd, 'text'); } catch {}
                 await this.submitProfile(data);
+            } else {
+                log('INFO', 'GR', 'stage=' + stage + ' already done or skipped. emailDone=' + GS.emailDone + ' codeDone=' + GS.codeDone + ' profileDone=' + GS.profileDone);
             }
         } catch (e) {
             log('ERROR', 'GR', e);
@@ -1131,7 +1159,6 @@ const GR = {
         for (let i = 0; i < C.maxTries; i++) {
             GS.attempts = i + 1;
             if (GS.attempts <= 3 || GS.attempts % 5 === 0) {
-                notify('[GR] Проверка #' + GS.attempts + '/' + C.maxTries, 'dbg', 2000);
                 setStatus('#GR' + GS.attempts);
             }
             const r = await findCodeFor(GS);
@@ -1152,7 +1179,6 @@ const GR = {
     },
 };
 
-// Обёртка findCode для Grok (использует GS.inbox)
 async function findCodeFor(gs) {
     if (!gs.inbox?.id) return { found: false, reason: 'no_inbox' };
     const msgs = await listMsgs(gs.inbox.id);
@@ -1218,48 +1244,19 @@ function showHelp() {
 <div style="margin-bottom:22px">
 <h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">⚙️ Шаг 1. Настройка</h3>
 <p style="margin:0 0 10px 0;color:var(--gmut);font-size:13px">Откройте <b style="color:var(--gfg)">☰ → Настройки → Общее</b> и заполните ключи.</p>
-<p style="margin:0 0 6px 0"><b>AgentMail API Key</b> — console.agentmail.to → API Keys → Create.</p>
-<p style="margin:0 0 6px 0"><b>SimpleLogin API Key</b> (если нужно) — app.simplelogin.io/dashboard/api_key.</p>
-<p style="margin:0 0 6px 0"><b>AgentMail email для проверки</b> — постоянный ящик, привязанный в SimpleLogin.</p>
-<p style="margin:0;color:var(--gdngr);font-size:12px">⚠ Не удаляйте relay-ящик, иначе алиасы SimpleLogin перестанут работать.</p>
 </div>
 <div style="margin-bottom:22px">
-<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">🚀 Шаг 2. ChatGPT</h3>
-<ol style="margin:0;padding-left:20px;color:var(--gmut);font-size:13px;line-height:1.7">
-<li>Откройте <b style="color:var(--gfg)">chatgpt.com</b> и убедитесь, что вы не авторизованы.</li>
-<li>Нажмите <b style="color:var(--gfg)">☰ → Регистрация</b>.</li>
-<li>Выберите <b style="color:var(--gfg)">«Новая регистрация»</b>.</li>
-<li>Скрипт создаст почту, введёт email, дождётся кода и заполнит профиль.</li>
-</ol>
-</div>
-<div style="margin-bottom:22px">
-<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">🚀 Шаг 3. Grok (accounts.x.ai)</h3>
+<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">🚀 Шаг 2. Grok</h3>
 <ol style="margin:0;padding-left:20px;color:var(--gmut);font-size:13px;line-height:1.7">
 <li>Откройте <b style="color:var(--gfg)">accounts.x.ai/sign-up</b>.</li>
-<li>Убедитесь, что Grok включён в настройках скрипта.</li>
-<li>Нажмите <b style="color:var(--gfg)">☰ → Регистрация Grok</b> (кнопка справа сверху).</li>
-<li>На первом шаге скрипт создаст почту и введёт email.</li>
-<li>На втором шаге дождётся письма и введёт 6-значный код.</li>
-<li>На третьем шаге заполнит имя, фамилию и пароль.</li>
-<li><b style="color:var(--gdngr)">⚠ Пройдите капчу Cloudflare Turnstile вручную</b> — скрипт не может решить её автоматически. Он будет ждать до 2 минут.</li>
+<li>Нажмите <b style="color:var(--gfg)">☰ → Регистрация Grok</b>.</li>
+<li>Если скрипт пишет «Не понял этап» — жмите <b style="color:var(--gfg)">☰ → Настройки → Диагностика → Скопировать отчёт</b> и пришлите мне.</li>
+<li>Капчу Cloudflare Turnstile проходите вручную — скрипт ждёт до 2 минут.</li>
 </ol>
 </div>
-<div style="margin-bottom:22px">
+<div>
 <h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">🔧 Диагностика</h3>
-<p style="margin:0 0 8px 0;color:var(--gmut);font-size:13px">
-<b>☰ → Настройки → Диагностика</b> — вкладка с:</p>
-<ul style="margin:0 0 8px 0;padding-left:20px;color:var(--gmut);font-size:13px">
-<li><b style="color:var(--gfg)">Подробный лог</b> — расширенное логирование HTTP, шагов, извлечения кода и заполнения полей.</li>
-<li><b style="color:var(--gfg)">Скопировать отчёт</b> — собирает в один текст: версию, URL, состояние ChatGPT и Grok, конфиг, DOM-проверки, ошибки и последние 200 строк лога.</li>
-</ul>
-</div>
-<div style="margin-bottom:22px">
-<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">⚠️ Лимиты</h3>
-<ul style="margin:0;padding-left:20px;color:var(--gmut);font-size:13px;line-height:1.7">
-<li><b style="color:var(--gfg)">AgentMail</b> — 3 ящика на бесплатном тарифе. Скрипт сам удалит 2 старых при превышении.</li>
-<li><b style="color:var(--gfg)">SimpleLogin</b> — relay-ящик не удаляется.</li>
-<li><b style="color:var(--gfg)">Grok</b> — на третьем шаге требуется ручное прохождение Cloudflare Turnstile.</li>
-</ul>
+<p style="margin:0;color:var(--gmut);font-size:13px">Кнопка <b style="color:var(--gfg)">«Дамп Grok DOM в консоль»</b> — если нужно посмотреть сырой DOM.</p>
 </div>
 </div>`;
     helpModal.appendChild(m);
@@ -1285,47 +1282,23 @@ function setStatus(t, c) {
     statusLbl.style.color = c || 'var(--gfg)';
 }
 
+// ВСЕГДА СЛЕВА, для всех сайтов
 function posMenu() {
     if (!menuBtn) return;
     const isMob = innerWidth < 768;
-    const host = location.hostname;
-    const isAuthGrok = host.includes('accounts.x.ai');
-    const isAuthOA = host.includes('auth.openai.com');
-
-    // На Grok и auth.openai.com — правый верхний угол.
-    // На chatgpt.com — слева от логотипа, как было.
-    if (isAuthGrok || isAuthOA) {
-        const right = isMob ? 8 : 12;
-        const top = isMob ? 8 : 8;
-        menuBtn.style.left = 'auto';
-        menuBtn.style.right = right + 'px';
-        menuBtn.style.top = top + 'px';
-        if (menuPnl) {
-            menuPnl.style.left = 'auto';
-            menuPnl.style.right = right + 'px';
-            menuPnl.style.top = (top + 44) + 'px';
-        }
-        if (statusLbl) {
-            statusLbl.style.left = 'auto';
-            statusLbl.style.right = right + 'px';
-            statusLbl.style.top = (top + 40) + 'px';
-            statusLbl.style.width = '36px';
-        }
-    } else {
-        const left = isMob ? 52 : 56;
-        menuBtn.style.right = 'auto';
-        menuBtn.style.left = left + 'px';
-        menuBtn.style.top = '8px';
-        if (menuPnl) {
-            menuPnl.style.right = 'auto';
-            menuPnl.style.left = left + 'px';
-            menuPnl.style.top = '52px';
-        }
-        if (statusLbl) {
-            statusLbl.style.right = 'auto';
-            statusLbl.style.left = left + 'px';
-            statusLbl.style.top = '44px';
-        }
+    const left = isMob ? 8 : 12;
+    menuBtn.style.left = left + 'px';
+    menuBtn.style.right = 'auto';
+    menuBtn.style.top = '8px';
+    if (menuPnl) {
+        menuPnl.style.left = left + 'px';
+        menuPnl.style.right = 'auto';
+        menuPnl.style.top = '52px';
+    }
+    if (statusLbl) {
+        statusLbl.style.left = left + 'px';
+        statusLbl.style.right = 'auto';
+        statusLbl.style.top = '44px';
     }
 }
 
@@ -1394,18 +1367,18 @@ function createMenu() {
     menuBtn.id = 'gpt-menu';
     menuBtn.title = 'Auto Register';
     menuBtn.innerHTML = ICO_MENU;
-    menuBtn.style.cssText = `position:fixed;top:8px;left:56px;z-index:99999;width:36px;height:36px;padding:0;background:transparent;color:var(--gfg);border:none;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s var(--gease)`;
+    menuBtn.style.cssText = `position:fixed;top:8px;left:12px;z-index:99999;width:36px;height:36px;padding:0;background:transparent;color:var(--gfg);border:none;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s var(--gease)`;
     menuBtn.onmouseenter = () => menuBtn.style.background = 'var(--ghov)';
     menuBtn.onmouseleave = () => menuBtn.style.background = 'transparent';
     menuBtn.onclick = e => { e.stopPropagation(); toggleMenu(); };
 
     statusLbl = document.createElement('div');
     statusLbl.id = 'gpt-status';
-    statusLbl.style.cssText = 'position:fixed;top:44px;left:56px;font-size:10px;font-weight:600;color:var(--gfg);text-align:center;width:36px;pointer-events:none';
+    statusLbl.style.cssText = 'position:fixed;top:44px;left:12px;font-size:10px;font-weight:600;color:var(--gfg);text-align:center;width:36px;pointer-events:none';
 
     menuPnl = document.createElement('div');
     menuPnl.className = 'gpt-gl gpt-pnl';
-    menuPnl.style.cssText = 'position:fixed;top:52px;left:56px;z-index:99999;display:none;flex-direction:column;gap:4px;padding:8px;border-radius:var(--grad);min-width:230px;max-width:calc(100vw - 32px)';
+    menuPnl.style.cssText = 'position:fixed;top:52px;left:12px;z-index:99999;display:none;flex-direction:column;gap:4px;padding:8px;border-radius:var(--grad);min-width:230px;max-width:calc(100vw - 32px)';
 
     const mkBtn = (id, ico, txt, fn, d = 0, cls = '') => {
         const b = document.createElement('button');
@@ -1429,12 +1402,10 @@ function createMenu() {
 
     posMenu();
     addEventListener('resize', posMenu);
-
-    // Пересчёт позиции при изменениях DOM (без постоянного таймера — нет мерцания)
     try {
         const obs = new MutationObserver(() => posMenu());
         obs.observe(document.body, { childList: true, subtree: true });
-    } catch (e) { log('WARN', 'menu', 'MutationObserver fail: ' + e.message); }
+    } catch (e) {}
 
     document.addEventListener('click', e => {
         if (menuPnl && menuPnl.style.display === 'flex' &&
@@ -1448,8 +1419,8 @@ function urlWatch(cb, timeout = 15000) {
     const last = location.href;
     let el = 0;
     urlTimer = setInterval(() => {
-        if (location.href !== last) { stopUrl(); log('INFO', 'urlWatch', last + ' → ' + location.href); cb(); }
-        else if ((el += 300) >= timeout) { stopUrl(); log('WARN', 'urlWatch', 'timeout ' + timeout + 'ms'); cb(true); }
+        if (location.href !== last) { stopUrl(); cb(); }
+        else if ((el += 300) >= timeout) { stopUrl(); cb(true); }
     }, 300);
 }
 function stopUrl() { if (urlTimer) { clearInterval(urlTimer); urlTimer = null; } }
@@ -1486,20 +1457,14 @@ async function stageLogin() {
         setStatus('Почта…');
         if (C.mode === 'simplelogin') {
             if (!C.slRelay) {
-                notify('Не указан AgentMail email для SimpleLogin. Откройте Настройки.', 'err', 10000);
+                notify('Не указан AgentMail email для SimpleLogin', 'err', 10000);
                 return setStatus('');
             }
             const ib = await listInboxes();
             if (!ib.length) { notify('AgentMail: нет inbox', 'err', 12000); return setStatus(''); }
             const relay = ib.find(i => (i.inbox_id || i.email) === C.slRelay);
-            if (!relay) {
-                notify(`AgentMail: ящик ${C.slRelay} не найден. Проверьте настройки.`, 'err', 10000);
-                log('ERROR', 'stageLogin', 'relay inbox not found. Available: ' + ib.map(i => i.inbox_id || i.email).join(', '));
-                return setStatus('');
-            }
+            if (!relay) { notify(`AgentMail: ящик ${C.slRelay} не найден`, 'err', 10000); return setStatus(''); }
             inbox = { id: relay.inbox_id, email: relay.inbox_id || relay.email };
-            log('INFO', 'stageLogin', 'using relay inbox: ' + inbox.email);
-            notify('SimpleLogin: создаю алиас…', 'info', 4000);
             const alias = await createAlias();
             if (!alias) return setStatus('');
             email = alias;
@@ -1508,20 +1473,13 @@ async function stageLogin() {
             let ib = await createInbox();
             if (!ib) {
                 const list = await listInboxes();
-                log('WARN', 'stageLogin', 'inbox create failed, existing: ' + list.length);
                 if (list.length >= 3) {
-                    notify('AgentMail: лимит ящиков. Удаляю старые…', 'warn', 5000);
                     const sorted = list.sort((a, b) => {
                         const ta = new Date(a.created_at || a.createdAt || 0).getTime();
                         const tb = new Date(b.created_at || b.createdAt || 0).getTime();
                         return ta - tb;
                     });
-                    const toDelete = sorted.slice(0, 2);
-                    for (const old of toDelete) {
-                        const id = old.inbox_id || old.email;
-                        log('INFO', 'stageLogin', 'deleting old inbox: ' + id);
-                        await delInbox(id);
-                    }
+                    for (const old of sorted.slice(0, 2)) await delInbox(old.inbox_id || old.email);
                     ib = await createInbox();
                 }
             }
@@ -1538,7 +1496,6 @@ async function stageLogin() {
         await save('codeReqAt', codeReqAt);
         await save('inbox', inbox);
         await save('email', email);
-        log('INFO', 'stageLogin', 'created inbox: ' + JSON.stringify(inbox) + ' codeReqAt=' + new Date(codeReqAt).toISOString());
     } else {
         const saved = await load('inbox');
         if (!saved?.id) { notify('Нет сохранённой почты', 'warn', 6000); return setStatus(''); }
@@ -1587,30 +1544,24 @@ async function stagePwd() {
 async function watchCode() {
     const start = Date.now();
     setCanContinue(true);
-    log('INFO', 'watchCode', 'started');
     while (Date.now() - start < 120000) {
         await sleep(1500);
-        if (regDone) { setCanContinue(false); log('INFO', 'watchCode', 'regDone'); return; }
+        if (regDone) { setCanContinue(false); return; }
         if (onProfile() || findPwd() || onAboutYou()) {
-            log('INFO', 'watchCode', 'next stage detected');
             setCanContinue(false); running = false; return runStage();
         }
         if (!findCodes()) {
             await sleep(1000);
             if (!findCodes()) {
-                log('INFO', 'watchCode', 'code field disappeared');
                 setCanContinue(false); running = false; return runStage();
             }
         }
     }
-    log('WARN', 'watchCode', 'timeout 120s');
     notify('Авто-переход не сработал. Нажмите «Продолжить».', 'warn', 12000);
 }
 
 async function stageVerify() {
     if (verifyDone || regDone || polling) return;
-    log('INFO', 'stageVerify', 'ENTER. host=' + location.hostname + ' path=' + location.pathname);
-    log('INFO', 'stageVerify', 'findCodes=' + (findCodes() ? 'yes' : 'no') + ' hasVerifyText=' + hasVerifyText());
     if (codeDone) { verifyDone = true; return stageProfile(); }
     polling = true;
     verifyStats.attempts = 0;
@@ -1625,13 +1576,9 @@ async function stageVerify() {
             if (f) { inbox = { id: f.inbox_id, email: f.inbox_id || f.email }; await save('inbox', inbox); }
         }
     }
-    if (!inbox?.id) {
-        notify('Нет ящика. Создайте новую регистрацию.', 'err', 10000);
-        polling = false; return;
-    }
+    if (!inbox?.id) { notify('Нет ящика. Создайте новую регистрацию.', 'err', 10000); polling = false; return; }
     verifyStats.inboxId = inbox.id;
     verifyStats.inboxEmail = inbox.email;
-    log('INFO', 'stageVerify', 'start inbox=' + inbox.email + ' codeReqAt=' + new Date(codeReqAt).toISOString());
     notify(`Проверка: ${inbox.email}`, 'info', 4000);
 
     for (let i = 0; i < C.maxTries; i++) {
@@ -1642,7 +1589,6 @@ async function stageVerify() {
         verifyStats.lastReason = r.reason || null;
         if (r.found) {
             verifyStats.lastCode = r.code;
-            verifyStats.lastCodeAge = r.age;
             notify(`Код: ${r.code}`, 'ok', 5000);
             const ok = await fillCode(r.code);
             if (ok) {
@@ -1655,8 +1601,6 @@ async function stageVerify() {
                 polling = false;
                 watchCode();
                 return;
-            } else {
-                notify('Не удалось ввести код', 'err', 6000);
             }
         }
         await sleep(C.interval);
@@ -1670,16 +1614,8 @@ async function stageProfile() {
     const { name, age } = findProfile();
     if (name || age) {
         setStatus('Профиль…');
-        if (name && !name.value) {
-            const n = genName();
-            await typeHuman(name, n);
-            notify(`Имя: ${n}`, 'info', 3000);
-        }
-        if (age && !age.value) {
-            const a = genAge();
-            await typeHuman(age, String(a));
-            notify(`Возраст: ${a}`, 'info', 3000);
-        }
+        if (name && !name.value) { const n = genName(); await typeHuman(name, n); notify(`Имя: ${n}`, 'info', 3000); }
+        if (age && !age.value) { const a = genAge(); await typeHuman(age, String(a)); notify(`Возраст: ${a}`, 'info', 3000); }
         await delay(200, 500);
         await clickCont();
         profileDone = true;
@@ -1696,7 +1632,6 @@ function runStage() {
         return;
     }
     if (!running || regDone) return;
-    log('INFO', 'runStage', 'detect=' + detect() + ' host=' + location.hostname + ' path=' + location.pathname);
     if (regDone) return;
     if (findPwd() && !pwdDone) return stagePwd();
     if (onProfile() && !profileDone) return stageProfile();
@@ -1724,17 +1659,17 @@ async function startReg() {
         GS.turnstileSolved = false; GS.detectedStage = null;
         await save('gr_codeDone', false);
         await save('gr_profileDone', false);
-        // Ключи проверяем ТОЛЬКО здесь, при нажатии «Регистрация»
+        await save('gr_emailDone', false);
         const ok = await ensureKeys();
         if (!ok) { notify('Ключи не заданы', 'warn', 5000); return; }
+        // Небольшая задержка: даём странице дорендериться
+        await sleep(500);
         await GR.run();
         return;
     }
-    // ChatGPT
     codeDone = false; profileDone = false; regDone = false; running = false;
     loginTried = false; verifyDone = false; pwdDone = false;
     canContinue = false; profileNotified = false;
-    log('INFO', 'startReg', 'ChatGPT registration');
     const ok = await ensureKeys();
     if (!ok) { notify('Ключи не заданы', 'warn', 5000); return; }
     running = true;
@@ -1748,8 +1683,6 @@ async function init() {
     log('INFO', 'init', 'start. host=' + location.hostname + ' path=' + location.pathname);
     injectCSS();
 
-    // ВАЖНО: НЕ ждём ключи здесь. Иначе меню не появится, пока не закроешь настройки.
-    // Ключи проверяются внутри startReg() при нажатии «Регистрация».
     const dbg = await load('debug');
     if (dbg === true) C.debug = true;
     const ge = await load('grokEnabled');
@@ -1763,25 +1696,25 @@ async function init() {
     if (isGrok()) {
         const codeDoneSaved = await load('gr_codeDone');
         const profileDoneSaved = await load('gr_profileDone');
+        const emailDoneSaved = await load('gr_emailDone');
         if (codeDoneSaved) GS.codeDone = true;
         if (profileDoneSaved) GS.profileDone = true;
+        if (emailDoneSaved) GS.emailDone = true;
+        GS.inbox = await load('gr_inbox');
+        GS.codeReqAt = await load('gr_codeReqAt');
 
         const stage = GR.detectStage();
-        if (C.grokEnabled && stage !== 'unknown' && !GS.regDone) {
-            // Автозапуск только при явных признаках середины регистрации,
-            // а не на самом первом шаге, чтобы не открывать настройки сами.
+        log('INFO', 'init', 'Grok stage=' + stage);
+        // Автозапуск только если регистрация уже начата (есть сохранённый inbox)
+        if (C.grokEnabled && GS.inbox?.id && stage !== 'unknown' && !GS.regDone) {
             if (stage === 'code' || stage === 'profile') {
-                log('INFO', 'init', 'Grok auto-run on stage=' + stage);
                 setTimeout(() => GR.run(), 1500);
-            } else {
-                log('INFO', 'init', 'Grok stage=' + stage + ' — ждём нажатия «Регистрация Grok»');
             }
         }
         return;
     }
 
     if (!loggedIn() && !onLogin() && !regDone && !running) {
-        log('INFO', 'init', 'ChatGPT auto-run');
         setTimeout(() => { if (!running) { running = true; runStage(); } }, 1000);
     } else if (findCodes() || hasVerifyText()) {
         running = true;
