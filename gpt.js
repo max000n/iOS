@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      83.1
+// @version      83.2
 // @description  Авторегистрация Grok через AgentMail.to / SimpleLogin
 // @author       You
 // @match        https://accounts.x.ai/*
@@ -41,7 +41,6 @@ const GS = {
     forceNewInbox: false,
 };
 
-// Общие переменные (для контекста/меню)
 let inited = false,
     urlTimer = null,
     helpModal = null,
@@ -89,14 +88,12 @@ function log(level, tag, ...args) {
 addEventListener('error', e => log('ERROR', 'window', e.message + ' at ' + e.filename + ':' + e.lineno));
 addEventListener('unhandledrejection', e => log('ERROR', 'promise', e.reason?.message || String(e.reason)));
 
-// ─── Расширенный дамп DOM Grok ───
 function dumpGrokDOM() {
     const out = [];
     const push = (label, val) => out.push(label + ': ' + val);
     push('--- GROK DOM DUMP ---', '');
     push('URL', location.href);
     push('readyState', document.readyState);
-    push('body.childElementCount', document.body ? document.body.childElementCount : 'no body');
     push('html.lang', document.documentElement.lang);
     const inputs = [...document.querySelectorAll('input')];
     push('inputs.total', inputs.length);
@@ -128,16 +125,11 @@ function dumpGrokDOM() {
             rect: { w: Math.round(r.width), h: Math.round(r.height) }
         }));
     });
-    const forms = [...document.querySelectorAll('form')];
-    push('forms.total', forms.length);
+    push('forms.total', document.querySelectorAll('form').length);
     const iframes = [...document.querySelectorAll('iframe')];
     push('iframes.total', iframes.length);
     iframes.slice(0, 10).forEach((el, i) => {
-        push(`iframe[${i}]`, JSON.stringify({
-            src: (el.src || '').slice(0, 120),
-            id: el.id, name: el.name,
-            visible: el.offsetParent !== null
-        }));
+        push(`iframe[${i}]`, JSON.stringify({ src: (el.src || '').slice(0, 120), id: el.id, name: el.name, visible: el.offsetParent !== null }));
     });
     push('turnstile.response input', !!document.querySelector('input[name="cf-turnstile-response"]'));
     push('turnstile.div[data-sitekey]', !!document.querySelector('div[data-sitekey]'));
@@ -156,7 +148,7 @@ async function buildReport() {
     const p = [];
     p.push('═══ GROK AUTO REGISTER — ОТЧЁТ ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия: 83.1');
+    p.push('Версия: 83.2');
     p.push('URL: ' + location.href);
     p.push('readyState: ' + document.readyState);
     p.push('Окно: ' + innerWidth + '×' + innerHeight);
@@ -198,8 +190,12 @@ async function buildReport() {
     p.push('GR.findPwd(): ' + (GR.findPwd() ? 'есть' : 'нет'));
     p.push('GR.hasCodeError(): ' + GR.hasCodeError());
     p.push('GR.findResendBtn(): ' + (GR.findResendBtn() ? 'есть' : 'нет'));
-    const sb = GR.findSubmit();
-    p.push('GR.findSubmit(): ' + (sb ? `есть ("${(sb.textContent || '').trim().slice(0, 40)}")` : 'нет'));
+    const sbE = GR.findSubmit('email');
+    const sbC = GR.findSubmit('code');
+    const sbP = GR.findSubmit('profile');
+    p.push('GR.findSubmit(email): ' + (sbE ? `"${(sbE.textContent||'').trim().slice(0,40)}"` : 'нет'));
+    p.push('GR.findSubmit(code): ' + (sbC ? `"${(sbC.textContent||'').trim().slice(0,40)}"` : 'нет'));
+    p.push('GR.findSubmit(profile): ' + (sbP ? `"${(sbP.textContent||'').trim().slice(0,40)}"` : 'нет'));
     p.push('GR.hasTurnstile(): ' + GR.hasTurnstile());
     p.push('GR.turnstileSolved(): ' + GR.turnstileSolved());
     p.push('GR.detectStage(): ' + GR.detectStage());
@@ -739,15 +735,25 @@ const GR = {
                [...document.querySelectorAll('input[type="password"]')].find(el => el.offsetParent !== null) ||
                null;
     },
-    findSubmit() {
+    // kind = 'email' | 'code' | 'profile' | undefined
+    findSubmit(kind) {
         const btns = [...document.querySelectorAll('button[type="submit"]')];
         const filtered = btns.filter(b => {
             if (this._ourIds.includes(b.id)) return false;
             if (b.closest('#grok-menu, #grok-status, .grok-pnl, #grok-report-modal')) return false;
             return b.offsetParent !== null;
         });
-        const priority = ['зарегистрироваться', 'подтвердить email', 'завершить регистрацию', 'продолжить', 'далее'];
-        for (const p of priority) {
+        let patterns;
+        if (kind === 'email') {
+            patterns = ['зарегистрироваться', 'sign up', 'continue', 'продолжить', 'далее'];
+        } else if (kind === 'code') {
+            patterns = ['подтвердить email', 'verify email', 'confirm email'];
+        } else if (kind === 'profile') {
+            patterns = ['завершить регистрацию', 'complete registration', 'create account'];
+        } else {
+            patterns = ['зарегистрироваться', 'подтвердить email', 'завершить регистрацию', 'продолжить', 'далее'];
+        }
+        for (const p of patterns) {
             const b = filtered.find(b => b.textContent.trim().toLowerCase().includes(p));
             if (b) return b;
         }
@@ -768,13 +774,11 @@ const GR = {
         return !!document.querySelector('input[name="cf-turnstile-response"]') ||
                !!document.querySelector('div[data-sitekey]') ||
                !!document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
-               // виджет-чекбокс "Подтвердите, что вы человек"
                !!document.querySelector('input[type="checkbox"]');
     },
     turnstileSolved() {
         const inp = document.querySelector('input[name="cf-turnstile-response"]');
         if (inp && inp.value && inp.value.length > 10) return true;
-        // Иногда Cloudflare Turnstile ставит скрытый input. Если видим, что капча уже не отображается — считаем пройденной.
         const widget = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
         if (widget) {
             const t = document.body?.innerText || '';
@@ -830,7 +834,7 @@ const GR = {
         notify('[GR] Ввожу email: ' + email, 'info', 4000);
         await typeHuman(inp, email);
         await delay(200, 500);
-        const btn = this.findSubmit();
+        const btn = this.findSubmit('email');
         if (!btn) { notify('[GR] Кнопка "Зарегистрироваться" не найдена', 'err'); return false; }
         logAlways('submitEmail', 'жму submit: "' + (btn.textContent || '').trim() + '"');
         await click(btn);
@@ -853,21 +857,37 @@ const GR = {
         await typeHuman(inp, code);
         logAlways('submitCode', 'после ввода value="' + inp.value + '"');
         await delay(200, 500);
-        const btn = this.findSubmit();
-        if (!btn) { notify('[GR] Кнопка "Подтвердить email" не найдена', 'err'); return false; }
-        logAlways('submitCode', 'жму submit: "' + (btn.textContent || '').trim() + '"');
-        await click(btn);
-        await sleep(3000);
-        if (this.hasCodeError()) {
-            GS.lastError = 'code_invalid';
-            logAlways('submitCode', 'Grok отверг код');
-            return false;
+
+        const btn = this.findSubmit('code');
+        if (!btn) {
+            logAlways('submitCode', 'кнопка "Подтвердить email" отсутствует — возможно авто-переход');
+        } else {
+            logAlways('submitCode', 'жму submit: "' + (btn.textContent || '').trim() + '"');
+            await click(btn);
         }
-        GS.codeDone = true;
-        await save('gr_codeDone', true);
-        return true;
+
+        const start = Date.now();
+        while (Date.now() - start < 5000) {
+            if (this.hasCodeError()) {
+                GS.lastError = 'code_invalid';
+                logAlways('submitCode', 'Grok отверг код');
+                return false;
+            }
+            if (this.hasProfileText()) {
+                logAlways('submitCode', 'profile-форма появилась');
+                GS.codeDone = true;
+                await save('gr_codeDone', true);
+                return true;
+            }
+            await sleep(200);
+        }
+        if (!this.hasCodeError()) {
+            GS.codeDone = true;
+            await save('gr_codeDone', true);
+            return true;
+        }
+        return false;
     },
-    // ─── ЗАПОЛНЕНИЕ ПРОФИЛЯ ───
     async submitProfile(data) {
         const { givenName, familyName, password } = data;
         const gi = this.findGivenName(), fi = this.findFamilyName(), pi = this.findPwd();
@@ -875,16 +895,29 @@ const GR = {
         if (!gi || !fi || !pi) { notify('[GR] Поля профиля не найдены', 'err'); return false; }
         notify('[GR] Заполняю профиль…', 'info', 4000);
 
+        await focusEl(gi); setVal(gi, ''); fireInput(gi, ''); await sleep(100);
         await typeHuman(gi, givenName);
         await delay(150, 300);
+
+        await focusEl(fi); setVal(fi, ''); fireInput(fi, ''); await sleep(100);
         await typeHuman(fi, familyName);
         await delay(150, 300);
+
+        await focusEl(pi); setVal(pi, ''); fireInput(pi, ''); await sleep(100);
         await typeHuman(pi, password);
         await delay(200, 500);
 
-        logAlways('submitProfile', 'gi.value="' + gi.value + '" fi.value="' + fi.value + '" pi.value="' + pi.value.slice(0,3) + '…"');
+        logAlways('submitProfile', 'gi.value="' + gi.value + '" fi.value="' + fi.value + '" pi.len=' + pi.value.length);
 
-        // Turnstile
+        if (!gi.value || !fi.value || !pi.value) {
+            notify('[GR] Поля не заполнены, пробую force-set', 'warn', 5000);
+            setVal(gi, givenName); fireInput(gi, givenName); gi.dispatchEvent(new Event('change', { bubbles: true }));
+            setVal(fi, familyName); fireInput(fi, familyName); fi.dispatchEvent(new Event('change', { bubbles: true }));
+            setVal(pi, password); fireInput(pi, password); pi.dispatchEvent(new Event('change', { bubbles: true }));
+            await sleep(300);
+            logAlways('submitProfile', 'after force: gi="' + gi.value + '" fi="' + fi.value + '" pi.len=' + pi.value.length);
+        }
+
         if (this.hasTurnstile()) {
             if (!this.turnstileSolved()) {
                 notify('[GR] ⚠ Пройдите капчу Cloudflare Turnstile вручную', 'warn', 15000);
@@ -898,23 +931,21 @@ const GR = {
             } else GS.turnstileSolved = true;
         }
 
-        const btn = this.findSubmit();
+        const btn = this.findSubmit('profile');
         if (!btn) { notify('[GR] Кнопка "Завершить регистрацию" не найдена', 'err'); return false; }
         logAlways('submitProfile', 'жму submit: "' + (btn.textContent || '').trim() + '"');
         await click(btn);
         await sleep(3000);
 
-        // Проверка результата
         if (this.hasProfileText()) {
-            logAlways('submitProfile', 'ошибка валидации после submit — форма осталась');
-            // Попробуем ещё раз (могли не заполниться поля)
+            logAlways('submitProfile', 'форма осталась — повторная попытка');
             const gi2 = this.findGivenName(), fi2 = this.findFamilyName(), pi2 = this.findPwd();
-            if (gi2 && !gi2.value) { await typeHuman(gi2, givenName); }
-            if (fi2 && !fi2.value) { await typeHuman(fi2, familyName); }
-            if (pi2 && !pi2.value) { await typeHuman(pi2, password); }
+            if (gi2 && !gi2.value) { setVal(gi2, givenName); fireInput(gi2, givenName); }
+            if (fi2 && !fi2.value) { setVal(fi2, familyName); fireInput(fi2, familyName); }
+            if (pi2 && !pi2.value) { setVal(pi2, password); fireInput(pi2, password); }
             await sleep(500);
-            const btn2 = this.findSubmit();
-            if (btn2) { logAlways('submitProfile', 'повторный клик submit'); await click(btn2); await sleep(3000); }
+            const btn2 = this.findSubmit('profile');
+            if (btn2) { logAlways('submitProfile', 'повторный submit'); await click(btn2); await sleep(3000); }
         }
 
         if (!this.hasProfileText()) {
@@ -1050,10 +1081,7 @@ const GR = {
                         for (let k = 0; k < 30; k++) {
                             await sleep(1000);
                             const check = await listMsgs(GS.inbox.id);
-                            if (check && !check.__rate) {
-                                newCount = check.length;
-                                if (newCount > 1) break;
-                            }
+                            if (check && !check.__rate) { newCount = check.length; if (newCount > 1) break; }
                         }
                         if (newCount <= 1) notify('[GR] Повторное письмо не пришло. Проверь вручную.', 'err', 10000);
                         continue;
@@ -1061,11 +1089,19 @@ const GR = {
                 }
                 if (ok) {
                     GS.polling = false; setStatus('');
-                    // Переходим к профилю
                     await this.waitFor(() => this.hasProfileText(), 10000, 'profile-form');
-                    if (this.hasProfileText()) {
-                        logAlways('GR', 'после кода → profile');
-                        await this.run();
+                    if (this.hasProfileText() && !GS.profileDone) {
+                        logAlways('GR', 'после кода → заполняю profile');
+                        const pwd = genPwd();
+                        const data = {
+                            givenName: ['Alex','Emma','James','Sophia','Michael','Olivia'][~~(Math.random()*6)],
+                            familyName: ['Smith','Johnson','Brown','Davis','Miller','Wilson'][~~(Math.random()*6)],
+                            password: pwd,
+                        };
+                        await save('gr_pwd', pwd);
+                        notify('[GR] 🔑 Пароль: ' + pwd, 'warn', 20000);
+                        try { GM_setClipboard(pwd, 'text'); } catch {}
+                        await this.submitProfile(data);
                     }
                     return;
                 }
@@ -1149,7 +1185,7 @@ function showHelp() {
     helpModal.onclick = e => { if (e.target === helpModal) { helpModal.remove(); helpModal = null; } };
 }
 
-// ═══════════════════ КОНТЕКСТ (ChatGPT-совместимо) ═══════════════════
+// ═══════════════════ КОНТЕКСТ ═══════════════════
 async function copyCtx() {
     const msgs = [];
     for (const sel of ['[data-message-author-role]','[data-testid^="conversation-turn-"]','.message','div[class*="markdown"]']) {
@@ -1277,7 +1313,7 @@ function createMenu() {
     });
 }
 
-// ═══════════════════ КНОПКА «ПРОДОЛЖИТЬ» ═══════════════════
+// ═══════════════════ ПРОДОЛЖИТЬ ═══════════════════
 function runStage() {
     if (!GS.running) GR.run();
 }
