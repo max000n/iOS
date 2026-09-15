@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      83.0
+// @version      83.1
 // @description  Авторегистрация Grok через AgentMail.to / SimpleLogin
 // @author       You
 // @match        https://accounts.x.ai/*
@@ -29,7 +29,6 @@ const C = {
     debug: false,
 };
 
-// ─── Состояние Grok ───
 const GS = {
     methodDone: false, emailDone: false, codeDone: false, profileDone: false, regDone: false,
     running: false, polling: false,
@@ -42,6 +41,14 @@ const GS = {
     forceNewInbox: false,
 };
 
+// Общие переменные (для контекста/меню)
+let inited = false,
+    urlTimer = null,
+    helpModal = null,
+    settingsModal = null,
+    ctx = null,
+    canContinue = false;
+
 // ═══════════════════ ДИАГНОСТИКА ═══════════════════
 const LOG_MAX = 800;
 const logBuf = [];
@@ -52,7 +59,6 @@ function ts() {
     return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
 }
 
-// logAlways — пишется ВСЕГДА (для ключевых шагов)
 function logAlways(tag, ...args) {
     const msg = args.map(a => {
         if (a instanceof Error) return a.message;
@@ -66,7 +72,6 @@ function logAlways(tag, ...args) {
     console.log(line);
 }
 
-// log — пишется только при debug (для шума)
 function log(level, tag, ...args) {
     if (!C.debug && level !== 'ERROR') return;
     const msg = args.map(a => {
@@ -84,11 +89,74 @@ function log(level, tag, ...args) {
 addEventListener('error', e => log('ERROR', 'window', e.message + ' at ' + e.filename + ':' + e.lineno));
 addEventListener('unhandledrejection', e => log('ERROR', 'promise', e.reason?.message || String(e.reason)));
 
+// ─── Расширенный дамп DOM Grok ───
+function dumpGrokDOM() {
+    const out = [];
+    const push = (label, val) => out.push(label + ': ' + val);
+    push('--- GROK DOM DUMP ---', '');
+    push('URL', location.href);
+    push('readyState', document.readyState);
+    push('body.childElementCount', document.body ? document.body.childElementCount : 'no body');
+    push('html.lang', document.documentElement.lang);
+    const inputs = [...document.querySelectorAll('input')];
+    push('inputs.total', inputs.length);
+    inputs.slice(0, 30).forEach((el, i) => {
+        const r = el.getBoundingClientRect();
+        const vis = el.offsetParent !== null || (r.width > 0 && r.height > 0);
+        push(`input[${i}]`, JSON.stringify({
+            id: el.id, name: el.name, type: el.type,
+            maxlength: el.getAttribute('maxlength'),
+            autocomplete: el.getAttribute('autocomplete'),
+            placeholder: el.placeholder,
+            inputmode: el.getAttribute('inputmode'),
+            ariaLabel: el.getAttribute('aria-label'),
+            visible: vis, value: (el.value || '').slice(0, 20),
+            rect: { w: Math.round(r.width), h: Math.round(r.height) }
+        }));
+    });
+    const btns = [...document.querySelectorAll('button, a[role="button"], div[role="button"], input[type="submit"]')];
+    push('buttons.total', btns.length);
+    btns.slice(0, 40).forEach((el, i) => {
+        const r = el.getBoundingClientRect();
+        const vis = el.offsetParent !== null || (r.width > 0 && r.height > 0);
+        push(`button[${i}]`, JSON.stringify({
+            tag: el.tagName, type: el.type || null,
+            text: (el.textContent || '').trim().slice(0, 60),
+            ariaLabel: el.getAttribute('aria-label'),
+            dataTestId: el.getAttribute('data-testid'),
+            visible: vis,
+            rect: { w: Math.round(r.width), h: Math.round(r.height) }
+        }));
+    });
+    const forms = [...document.querySelectorAll('form')];
+    push('forms.total', forms.length);
+    const iframes = [...document.querySelectorAll('iframe')];
+    push('iframes.total', iframes.length);
+    iframes.slice(0, 10).forEach((el, i) => {
+        push(`iframe[${i}]`, JSON.stringify({
+            src: (el.src || '').slice(0, 120),
+            id: el.id, name: el.name,
+            visible: el.offsetParent !== null
+        }));
+    });
+    push('turnstile.response input', !!document.querySelector('input[name="cf-turnstile-response"]'));
+    push('turnstile.div[data-sitekey]', !!document.querySelector('div[data-sitekey]'));
+    push('turnstile.iframe', !!document.querySelector('iframe[src*="challenges.cloudflare.com"]'));
+    push('turnstile checkbox input', !!document.querySelector('input[type="checkbox"]'));
+    const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 800);
+    push('body.innerText (800)', bodyText);
+    [...document.querySelectorAll('h1, h2')].slice(0, 5).forEach((el, i) => {
+        push(`heading[${i}]`, (el.textContent || '').trim().slice(0, 100));
+    });
+    push('--- END DUMP ---', '');
+    return out.join('\n');
+}
+
 async function buildReport() {
     const p = [];
     p.push('═══ GROK AUTO REGISTER — ОТЧЁТ ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия: 83.0');
+    p.push('Версия: 83.1');
     p.push('URL: ' + location.href);
     p.push('readyState: ' + document.readyState);
     p.push('Окно: ' + innerWidth + '×' + innerHeight);
@@ -125,12 +193,21 @@ async function buildReport() {
     p.push('GR.findMethodEmailBtn(): ' + (GR.findMethodEmailBtn() ? 'есть' : 'нет'));
     p.push('GR.findEmail(): ' + (GR.findEmail() ? 'есть' : 'нет'));
     p.push('GR.findCode(): ' + (GR.findCode() ? 'есть' : 'нет'));
+    p.push('GR.findGivenName(): ' + (GR.findGivenName() ? 'есть' : 'нет'));
+    p.push('GR.findFamilyName(): ' + (GR.findFamilyName() ? 'есть' : 'нет'));
+    p.push('GR.findPwd(): ' + (GR.findPwd() ? 'есть' : 'нет'));
     p.push('GR.hasCodeError(): ' + GR.hasCodeError());
     p.push('GR.findResendBtn(): ' + (GR.findResendBtn() ? 'есть' : 'нет'));
     const sb = GR.findSubmit();
     p.push('GR.findSubmit(): ' + (sb ? `есть ("${(sb.textContent || '').trim().slice(0, 40)}")` : 'нет'));
+    p.push('GR.hasTurnstile(): ' + GR.hasTurnstile());
+    p.push('GR.turnstileSolved(): ' + GR.turnstileSolved());
+    p.push('GR.detectStage(): ' + GR.detectStage());
     p.push('inputs.total: ' + document.querySelectorAll('input').length);
     p.push('buttons.total: ' + document.querySelectorAll('button').length);
+    p.push('');
+    p.push('─── DOM DUMP ───');
+    p.push(dumpGrokDOM());
     p.push('');
     p.push('─── ОШИБКИ (' + diagErrors.length + ') ───');
     if (!diagErrors.length) p.push('(нет)');
@@ -276,6 +353,20 @@ async function focusEl(el) {
 const save = (k, v) => GM.setValue('cg_' + k, v).catch(() => false);
 const load = k => GM.getValue('cg_' + k, null).catch(() => null);
 
+async function typeHuman(el, txt) {
+    if (!el) return;
+    await focusEl(el);
+    setVal(el, '');
+    const mn = C.fast ? 20 : 80, mx = C.fast ? 60 : 180;
+    for (const ch of txt) {
+        setVal(el, el.value + ch);
+        fireInput(el, ch);
+        await sleep(mn + Math.random() * (mx - mn));
+    }
+    await delay(50, 150);
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 // ═══════════════════ HTTP ═══════════════════
 function req(opts) {
     const short = (opts.url || '').replace(/^https?:\/\/[^/]+/, '').slice(0, 80);
@@ -378,6 +469,19 @@ function openSettings() {
 <span id="gsw" style="position:relative;width:38px;height:22px;background:${C.debug ? 'var(--gfg)' : '#8e8e8e'};border-radius:999px;flex-shrink:0;cursor:pointer;transition:background .2s var(--gease)">
 <span style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s var(--gease);box-shadow:0 1px 3px rgba(0,0,0,.3);transform:translateX(${C.debug ? '16px' : '0'})"></span></span></div>
 <button id="grepBtn" style="width:100%;padding:12px;background:var(--gelev);color:var(--gfg);border:1px solid var(--gbd);border-radius:999px;font-size:13px;cursor:pointer;font-family:inherit;margin-bottom:12px">Скопировать отчёт</button>
+<button id="gdumpBtn" style="width:100%;padding:12px;background:var(--gelev);color:var(--gfg);border:1px solid var(--gbd);border-radius:999px;font-size:13px;cursor:pointer;font-family:inherit;margin-bottom:12px">Дамп Grok DOM в консоль</button>
+<p style="color:var(--gmut);font-size:12px;margin:0 0 8px 0">Live-состояние:</p>
+<div style="background:var(--gelev);padding:10px 12px;border-radius:10px;font-family:ui-monospace,monospace;font-size:11px;color:var(--gmut);line-height:1.6;white-space:pre-wrap">stage: ${GR.detectStage()}
+GS.running: ${GS.running}
+GS.polling: ${GS.polling}
+GS.methodDone: ${GS.methodDone}
+GS.emailDone: ${GS.emailDone}
+GS.codeDone: ${GS.codeDone}
+GS.profileDone: ${GS.profileDone}
+GS.attempts: ${GS.attempts}
+GS.consecutiveNoCode: ${GS.consecutiveNoCode}
+inputs: ${document.querySelectorAll('input').length}
+buttons: ${document.querySelectorAll('button').length}</div>
 </div>
 <div style="height:16px"></div>
 <div style="display:flex;flex-direction:column;gap:10px">
@@ -441,6 +545,12 @@ function openSettings() {
             notify('Ключи удалены', 'ok', 3000);
         };
         d.querySelector('#grepBtn').onclick = () => { settingsModal.remove(); settingsModal = null; copyReport(); };
+        d.querySelector('#gdumpBtn').onclick = () => {
+            const dump = dumpGrokDOM();
+            console.log(dump);
+            try { if (typeof GM_setClipboard !== 'undefined') GM_setClipboard(dump, 'text'); } catch {}
+            notify('Дамп Grok DOM скопирован (см. консоль)', 'ok', 4000);
+        };
         setTimeout(() => am.focus(), 100);
     });
 }
@@ -527,24 +637,15 @@ async function createAlias() {
 // ═══════════════════ КОД ═══════════════════
 function extractCode(data) {
     if (!data) return null;
-    const parts = [
-        data.subject, data.extracted_text, data.extracted_html,
-        data.text, data.html, data.body, data.preview
-    ].filter(Boolean);
-    const raw = parts.join('\n')
-        .replace(/<[^>]*>/g, ' ')
-        .replace(/&nbsp;|&zwnj;/g, ' ')
-        .replace(/[\u00a0\u200b\u2028\u2029]/g, ' ');
+    const parts = [data.subject, data.extracted_text, data.extracted_html, data.text, data.html, data.body, data.preview].filter(Boolean);
+    const raw = parts.join('\n').replace(/<[^>]*>/g, ' ').replace(/&nbsp;|&zwnj;/g, ' ').replace(/[\u00a0\u200b\u2028\u2029]/g, ' ');
 
-    // 1) XXX-XXX (формат SpaceXAI: "825-046")
     const dashed = raw.match(/\b(\d{3})[\s-](\d{3})\b/);
     if (dashed) {
         const code = dashed[1] + dashed[2];
         logAlways('extractCode', `dashed XXX-XXX → ${code}`);
         return code;
     }
-
-    // 2) По контексту
     const contextual = raw.match(/(?:confirmation code|verification code|security code|ваш код|код подтверждения)[^\d]{0,60}(\d{6})/i)
                     || raw.match(/(\d{6})[^\d]{0,60}(?:is your|код)/i);
     if (contextual) {
@@ -552,8 +653,6 @@ function extractCode(data) {
         logAlways('extractCode', `contextual → ${code}`);
         return code;
     }
-
-    // 3) Любые 6 цифр, кроме репдижитов (111111..999999)
     const allSix = [...raw.matchAll(/\b(\d{6})\b/g)].map(m => m[1]);
     const filtered = allSix.filter(c => !/^(\d)\1{5}$/.test(c));
     if (filtered.length) {
@@ -586,8 +685,7 @@ async function findCodeFor(gs) {
     for (const m of fresh) {
         if (gs.usedIds.has(m.message_id)) continue;
         const full = (await getMsg(gs.inbox.id, m.message_id)) || m;
-        const preview = [full.subject, full.extracted_text, full.text, full.preview]
-            .filter(Boolean).join(' | ').slice(0, 300).replace(/\s+/g, ' ');
+        const preview = [full.subject, full.extracted_text, full.text, full.preview].filter(Boolean).join(' | ').slice(0, 300).replace(/\s+/g, ' ');
         logAlways('findCode', `msg ${m.message_id}: subject="${(full.subject||'').slice(0,80)}" preview="${preview}"`);
         const code = extractCode(full);
         if (code) {
@@ -597,21 +695,6 @@ async function findCodeFor(gs) {
         }
     }
     return { found: false, reason: 'no_code', count: fresh.length };
-}
-
-// ═══════════════════ ВВОД ТЕКСТА ═══════════════════
-async function typeHuman(el, txt) {
-    if (!el) return;
-    await focusEl(el);
-    setVal(el, '');
-    const mn = C.fast ? 20 : 80, mx = C.fast ? 60 : 180;
-    for (const ch of txt) {
-        setVal(el, el.value + ch);
-        fireInput(el, ch);
-        await sleep(mn + Math.random() * (mx - mn));
-    }
-    await delay(50, 150);
-    el.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
 // ═══════════════════ GROK MODULE ═══════════════════
@@ -684,11 +767,20 @@ const GR = {
     hasTurnstile() {
         return !!document.querySelector('input[name="cf-turnstile-response"]') ||
                !!document.querySelector('div[data-sitekey]') ||
-               !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+               !!document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
+               // виджет-чекбокс "Подтвердите, что вы человек"
+               !!document.querySelector('input[type="checkbox"]');
     },
     turnstileSolved() {
         const inp = document.querySelector('input[name="cf-turnstile-response"]');
-        return !!(inp && inp.value && inp.value.length > 10);
+        if (inp && inp.value && inp.value.length > 10) return true;
+        // Иногда Cloudflare Turnstile ставит скрытый input. Если видим, что капча уже не отображается — считаем пройденной.
+        const widget = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+        if (widget) {
+            const t = document.body?.innerText || '';
+            if (!/Подтвердите, что вы человек|Verify you are human/i.test(t)) return true;
+        }
+        return false;
     },
     hasEmailText() {
         const t = document.body?.innerText || '';
@@ -775,15 +867,24 @@ const GR = {
         await save('gr_codeDone', true);
         return true;
     },
+    // ─── ЗАПОЛНЕНИЕ ПРОФИЛЯ ───
     async submitProfile(data) {
         const { givenName, familyName, password } = data;
         const gi = this.findGivenName(), fi = this.findFamilyName(), pi = this.findPwd();
+        logAlways('submitProfile', 'gi=' + (gi ? 'есть' : 'нет') + ' fi=' + (fi ? 'есть' : 'нет') + ' pi=' + (pi ? 'есть' : 'нет'));
         if (!gi || !fi || !pi) { notify('[GR] Поля профиля не найдены', 'err'); return false; }
         notify('[GR] Заполняю профиль…', 'info', 4000);
+
         await typeHuman(gi, givenName);
+        await delay(150, 300);
         await typeHuman(fi, familyName);
+        await delay(150, 300);
         await typeHuman(pi, password);
         await delay(200, 500);
+
+        logAlways('submitProfile', 'gi.value="' + gi.value + '" fi.value="' + fi.value + '" pi.value="' + pi.value.slice(0,3) + '…"');
+
+        // Turnstile
         if (this.hasTurnstile()) {
             if (!this.turnstileSolved()) {
                 notify('[GR] ⚠ Пройдите капчу Cloudflare Turnstile вручную', 'warn', 15000);
@@ -796,14 +897,35 @@ const GR = {
                 if (!this.turnstileSolved()) { notify('[GR] Капча не пройдена', 'err', 8000); return false; }
             } else GS.turnstileSolved = true;
         }
+
         const btn = this.findSubmit();
-        if (!btn) { notify('[GR] Кнопка не найдена', 'err'); return false; }
+        if (!btn) { notify('[GR] Кнопка "Завершить регистрацию" не найдена', 'err'); return false; }
+        logAlways('submitProfile', 'жму submit: "' + (btn.textContent || '').trim() + '"');
         await click(btn);
-        GS.profileDone = true;
-        await save('gr_profileDone', true);
-        notify('[GR] Регистрация завершена!', 'ok', 10000);
-        GS.regDone = true;
-        return true;
+        await sleep(3000);
+
+        // Проверка результата
+        if (this.hasProfileText()) {
+            logAlways('submitProfile', 'ошибка валидации после submit — форма осталась');
+            // Попробуем ещё раз (могли не заполниться поля)
+            const gi2 = this.findGivenName(), fi2 = this.findFamilyName(), pi2 = this.findPwd();
+            if (gi2 && !gi2.value) { await typeHuman(gi2, givenName); }
+            if (fi2 && !fi2.value) { await typeHuman(fi2, familyName); }
+            if (pi2 && !pi2.value) { await typeHuman(pi2, password); }
+            await sleep(500);
+            const btn2 = this.findSubmit();
+            if (btn2) { logAlways('submitProfile', 'повторный клик submit'); await click(btn2); await sleep(3000); }
+        }
+
+        if (!this.hasProfileText()) {
+            GS.profileDone = true;
+            await save('gr_profileDone', true);
+            notify('[GR] Регистрация завершена!', 'ok', 10000);
+            GS.regDone = true;
+            return true;
+        }
+        notify('[GR] Профиль не принят, проверь вручную', 'warn', 10000);
+        return false;
     },
     async run() {
         if (GS.running) { logAlways('GR', 'run() уже запущен'); return; }
@@ -923,7 +1045,6 @@ const GR = {
                         await save('gr_codeReqAt', GS.codeReqAt);
                         GS.lastError = null;
                         GS.attempts = 0;
-                        // Ждём НОВОЕ письмо
                         notify('[GR] Жду повторное письмо…', 'info', 5000);
                         let newCount = 0;
                         for (let k = 0; k < 30; k++) {
@@ -934,13 +1055,20 @@ const GR = {
                                 if (newCount > 1) break;
                             }
                         }
-                        if (newCount <= 1) {
-                            notify('[GR] Повторное письмо не пришло. Проверь вручную.', 'err', 10000);
-                        }
+                        if (newCount <= 1) notify('[GR] Повторное письмо не пришло. Проверь вручную.', 'err', 10000);
                         continue;
                     } else { notify('[GR] Кнопка "Отправить повторно" не найдена', 'err', 6000); break; }
                 }
-                if (ok) { GS.polling = false; setStatus(''); return; }
+                if (ok) {
+                    GS.polling = false; setStatus('');
+                    // Переходим к профилю
+                    await this.waitFor(() => this.hasProfileText(), 10000, 'profile-form');
+                    if (this.hasProfileText()) {
+                        logAlways('GR', 'после кода → profile');
+                        await this.run();
+                    }
+                    return;
+                }
             } else {
                 if (r.reason === 'no_code') GS.consecutiveNoCode++;
                 else GS.consecutiveNoCode = 0;
@@ -1021,11 +1149,50 @@ function showHelp() {
     helpModal.onclick = e => { if (e.target === helpModal) { helpModal.remove(); helpModal = null; } };
 }
 
+// ═══════════════════ КОНТЕКСТ (ChatGPT-совместимо) ═══════════════════
+async function copyCtx() {
+    const msgs = [];
+    for (const sel of ['[data-message-author-role]','[data-testid^="conversation-turn-"]','.message','div[class*="markdown"]']) {
+        const els = document.querySelectorAll(sel);
+        if (!els.length) continue;
+        els.forEach(el => {
+            const role = el.getAttribute('data-message-author-role') ||
+                el.closest('[data-message-author-role]')?.getAttribute('data-message-author-role') || 'unknown';
+            const t = el.innerText.trim();
+            if (t.length > 5) msgs.push({ role, text: t });
+        });
+        break;
+    }
+    if (!msgs.length) return notify('Не найдено сообщений', 'err');
+    const text = msgs.map(m => `[${m.role === 'user' ? 'Пользователь' : m.role === 'assistant' ? 'Ассистент' : '?'}]: ${m.text}`).join('\n\n');
+    ctx = text;
+    await save('ctx', text);
+    try {
+        if (typeof GM_setClipboard !== 'undefined') GM_setClipboard(text, 'text');
+        else await navigator.clipboard.writeText(text);
+        notify(`Скопировано (${msgs.length} сообщ., ${text.length} симв.)`, 'ok');
+    } catch { notify('Ошибка копирования', 'err'); }
+    closeMenu();
+}
+async function pasteCtx() {
+    if (!ctx) ctx = await load('ctx');
+    if (!ctx) return notify('Сначала скопируйте контекст', 'warn');
+    const inp = document.querySelector('textarea#prompt-textarea,textarea[placeholder*="Message"],textarea[placeholder*="Спросите"],textarea,div[contenteditable="true"]');
+    if (!inp) return notify('Поле ввода не найдено', 'err');
+    if (inp.tagName === 'TEXTAREA' || inp.tagName === 'INPUT') await typeHuman(inp, ctx);
+    else if (inp.isContentEditable) { inp.focus(); inp.innerText = ctx; inp.dispatchEvent(new Event('input', { bubbles: true })); }
+    notify(`Вставлено (${ctx.length} симв.)`, 'ok');
+    closeMenu();
+}
+
 // ═══════════════════ МЕНЮ ═══════════════════
 let menuBtn = null, menuPnl = null, menuVis = false, statusLbl = null;
 
 const ICO_MENU = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>`;
+const ICO_COPY = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+const ICO_PASTE = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>`;
 const ICO_REG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`;
+const ICO_CONT = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
 const ICO_SET = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
 const ICO_HELP = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
 
@@ -1042,11 +1209,18 @@ function posMenu() {
     if (menuPnl) { menuPnl.style.left = left + 'px'; menuPnl.style.right = 'auto'; menuPnl.style.top = '52px'; }
     if (statusLbl) { statusLbl.style.left = left + 'px'; statusLbl.style.right = 'auto'; statusLbl.style.top = '44px'; }
 }
+function setCanContinue(v) { canContinue = v; if (menuVis) updateMenu(); }
+function updateMenu() {
+    if (!menuPnl) return;
+    const cc = menuPnl.querySelector('#gc');
+    if (cc) cc.style.display = canContinue ? 'flex' : 'none';
+}
 function closeMenu() { if (menuPnl) { menuPnl.style.animation = 'none'; menuPnl.style.display = 'none'; } menuVis = false; }
 function toggleMenu() {
     if (!menuPnl) return;
     menuVis = !menuVis;
     if (menuVis) {
+        updateMenu();
         menuPnl.style.display = 'flex';
         menuPnl.style.animation = 'none';
         void menuPnl.offsetWidth;
@@ -1083,8 +1257,11 @@ function createMenu() {
         return b;
     };
     menuPnl.appendChild(mkBtn('gr', ICO_REG, 'Регистрация Grok', () => { closeMenu(); startReg(); }, 0));
-    menuPnl.appendChild(mkBtn('gset', ICO_SET, 'Настройки', () => { closeMenu(); openSettings(); }, 80));
-    menuPnl.appendChild(mkBtn('ghlp', ICO_HELP, 'Помощь', () => { closeMenu(); showHelp(); }, 160));
+    menuPnl.appendChild(mkBtn('gc', ICO_CONT, 'Продолжить', () => { closeMenu(); setCanContinue(false); runStage(); }, 40, 'grok-cont'));
+    menuPnl.appendChild(mkBtn('gcp', ICO_COPY, 'Копировать контекст', copyCtx, 80));
+    menuPnl.appendChild(mkBtn('gps', ICO_PASTE, 'Вставить контекст', pasteCtx, 120));
+    menuPnl.appendChild(mkBtn('gset', ICO_SET, 'Настройки', () => { closeMenu(); openSettings(); }, 160));
+    menuPnl.appendChild(mkBtn('ghlp', ICO_HELP, 'Помощь', () => { closeMenu(); showHelp(); }, 200));
 
     document.body.appendChild(menuBtn);
     document.body.appendChild(menuPnl);
@@ -1098,6 +1275,11 @@ function createMenu() {
         if (menuPnl && menuPnl.style.display === 'flex' &&
             !menuPnl.contains(e.target) && !menuBtn.contains(e.target)) closeMenu();
     });
+}
+
+// ═══════════════════ КНОПКА «ПРОДОЛЖИТЬ» ═══════════════════
+function runStage() {
+    if (!GS.running) GR.run();
 }
 
 // ═══════════════════ СТАРТ ═══════════════════
@@ -1130,6 +1312,8 @@ async function startReg() {
 
 // ═══════════════════ INIT ═══════════════════
 async function init() {
+    if (inited) return;
+    inited = true;
     logAlways('init', 'start host=' + location.hostname + ' path=' + location.pathname);
     injectCSS();
     const dbg = await load('debug');
@@ -1137,7 +1321,6 @@ async function init() {
     createMenu();
     await sleep(300);
 
-    // Восстановление состояния
     const savedInbox = await load('gr_inbox');
     if (savedInbox?.id) {
         GS.inbox = savedInbox;
@@ -1150,7 +1333,6 @@ async function init() {
     const stage = GR.detectStage();
     logAlways('init', 'Grok stage=' + stage + ' savedInbox=' + (savedInbox?.email || 'нет'));
 
-    // Автозапуск только если есть сохранённый inbox и мы на code/profile
     if (savedInbox?.id && !GS.regDone) {
         if (stage === 'code' && !GS.codeDone) {
             logAlways('init', 'Автозапуск pollCode (восстановление)');
