@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         Grok Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      83.2
+// @version      83.5
 // @description  Авторегистрация Grok через AgentMail.to / SimpleLogin
 // @author       You
 // @match        https://accounts.x.ai/*
+// @match        https://grok.com/*
+// @match        https://*.grok.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM.getValue
 // @grant        GM.setValue
@@ -42,11 +44,14 @@ const GS = {
 };
 
 let inited = false,
-    urlTimer = null,
     helpModal = null,
     settingsModal = null,
     ctx = null,
     canContinue = false;
+
+// ═══════════════════ САЙТ ═══════════════════
+const isAccounts = () => location.hostname === 'accounts.x.ai';
+const isGrokChat = () => location.hostname === 'grok.com' || location.hostname.endsWith('.grok.com');
 
 // ═══════════════════ ДИАГНОСТИКА ═══════════════════
 const LOG_MAX = 800;
@@ -91,7 +96,7 @@ addEventListener('unhandledrejection', e => log('ERROR', 'promise', e.reason?.me
 function dumpGrokDOM() {
     const out = [];
     const push = (label, val) => out.push(label + ': ' + val);
-    push('--- GROK DOM DUMP ---', '');
+    push('--- DOM DUMP ---', '');
     push('URL', location.href);
     push('readyState', document.readyState);
     push('html.lang', document.documentElement.lang);
@@ -148,8 +153,10 @@ async function buildReport() {
     const p = [];
     p.push('═══ GROK AUTO REGISTER — ОТЧЁТ ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия: 83.2');
+    p.push('Версия: 83.5');
     p.push('URL: ' + location.href);
+    p.push('Хост: ' + location.hostname);
+    p.push('Сайт: ' + (isAccounts() ? 'accounts.x.ai' : isGrokChat() ? 'grok.com (только меню)' : 'неизвестный'));
     p.push('readyState: ' + document.readyState);
     p.push('Окно: ' + innerWidth + '×' + innerHeight);
     p.push('');
@@ -177,28 +184,33 @@ async function buildReport() {
     p.push('mode: ' + C.mode + ' | slDomain: ' + (C.slDomain || '—') + ' | slPrefix: ' + (C.slPrefix || '—') + ' | slRelay: ' + (C.slRelay || '—'));
     p.push('amKey: ' + (C.amKey ? 'да' : 'нет') + ' | slKey: ' + (C.slKey ? 'да' : 'нет'));
     p.push('debug: ' + C.debug);
-    p.push('detect(): ' + GR.detectStage());
-    p.push('menuBtn.left: ' + (menuBtn ? menuBtn.style.left : '—'));
-    p.push('');
-    p.push('─── DOM ───');
-    p.push('GR.hasMethodChoice(): ' + GR.hasMethodChoice());
-    p.push('GR.findMethodEmailBtn(): ' + (GR.findMethodEmailBtn() ? 'есть' : 'нет'));
-    p.push('GR.findEmail(): ' + (GR.findEmail() ? 'есть' : 'нет'));
-    p.push('GR.findCode(): ' + (GR.findCode() ? 'есть' : 'нет'));
-    p.push('GR.findGivenName(): ' + (GR.findGivenName() ? 'есть' : 'нет'));
-    p.push('GR.findFamilyName(): ' + (GR.findFamilyName() ? 'есть' : 'нет'));
-    p.push('GR.findPwd(): ' + (GR.findPwd() ? 'есть' : 'нет'));
-    p.push('GR.hasCodeError(): ' + GR.hasCodeError());
-    p.push('GR.findResendBtn(): ' + (GR.findResendBtn() ? 'есть' : 'нет'));
-    const sbE = GR.findSubmit('email');
-    const sbC = GR.findSubmit('code');
-    const sbP = GR.findSubmit('profile');
-    p.push('GR.findSubmit(email): ' + (sbE ? `"${(sbE.textContent||'').trim().slice(0,40)}"` : 'нет'));
-    p.push('GR.findSubmit(code): ' + (sbC ? `"${(sbC.textContent||'').trim().slice(0,40)}"` : 'нет'));
-    p.push('GR.findSubmit(profile): ' + (sbP ? `"${(sbP.textContent||'').trim().slice(0,40)}"` : 'нет'));
-    p.push('GR.hasTurnstile(): ' + GR.hasTurnstile());
-    p.push('GR.turnstileSolved(): ' + GR.turnstileSolved());
-    p.push('GR.detectStage(): ' + GR.detectStage());
+    if (isAccounts()) {
+        p.push('detect(): ' + GR.detectStage());
+        p.push('menuBtn.left: ' + (menuBtn ? menuBtn.style.left : '—'));
+        p.push('menuBtn.right: ' + (menuBtn ? menuBtn.style.right : '—'));
+        p.push('');
+        p.push('─── DOM ───');
+        p.push('GR.hasMethodChoice(): ' + GR.hasMethodChoice());
+        p.push('GR.findMethodEmailBtn(): ' + (GR.findMethodEmailBtn() ? 'есть' : 'нет'));
+        p.push('GR.findEmail(): ' + (GR.findEmail() ? 'есть' : 'нет'));
+        p.push('GR.findCode(): ' + (GR.findCode() ? 'есть' : 'нет'));
+        p.push('GR.findGivenName(): ' + (GR.findGivenName() ? 'есть' : 'нет'));
+        p.push('GR.findFamilyName(): ' + (GR.findFamilyName() ? 'есть' : 'нет'));
+        p.push('GR.findPwd(): ' + (GR.findPwd() ? 'есть' : 'нет'));
+        p.push('GR.hasCodeError(): ' + GR.hasCodeError());
+        p.push('GR.findResendBtn(): ' + (GR.findResendBtn() ? 'есть' : 'нет'));
+        const sbE = GR.findSubmit('email');
+        const sbC = GR.findSubmit('code');
+        const sbP = GR.findSubmit('profile');
+        p.push('GR.findSubmit(email): ' + (sbE ? `"${(sbE.textContent||'').trim().slice(0,40)}"` : 'нет'));
+        p.push('GR.findSubmit(code): ' + (sbC ? `"${(sbC.textContent||'').trim().slice(0,40)}"` : 'нет'));
+        p.push('GR.findSubmit(profile): ' + (sbP ? `"${(sbP.textContent||'').trim().slice(0,40)}"` : 'нет'));
+        p.push('GR.hasTurnstile(): ' + GR.hasTurnstile());
+        p.push('GR.turnstileSolved(): ' + GR.turnstileSolved());
+        p.push('GR.detectStage(): ' + GR.detectStage());
+    } else {
+        p.push('Режим: только меню (grok.com)');
+    }
     p.push('inputs.total: ' + document.querySelectorAll('input').length);
     p.push('buttons.total: ' + document.querySelectorAll('button').length);
     p.push('');
@@ -465,9 +477,10 @@ function openSettings() {
 <span id="gsw" style="position:relative;width:38px;height:22px;background:${C.debug ? 'var(--gfg)' : '#8e8e8e'};border-radius:999px;flex-shrink:0;cursor:pointer;transition:background .2s var(--gease)">
 <span style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s var(--gease);box-shadow:0 1px 3px rgba(0,0,0,.3);transform:translateX(${C.debug ? '16px' : '0'})"></span></span></div>
 <button id="grepBtn" style="width:100%;padding:12px;background:var(--gelev);color:var(--gfg);border:1px solid var(--gbd);border-radius:999px;font-size:13px;cursor:pointer;font-family:inherit;margin-bottom:12px">Скопировать отчёт</button>
-<button id="gdumpBtn" style="width:100%;padding:12px;background:var(--gelev);color:var(--gfg);border:1px solid var(--gbd);border-radius:999px;font-size:13px;cursor:pointer;font-family:inherit;margin-bottom:12px">Дамп Grok DOM в консоль</button>
+<button id="gdumpBtn" style="width:100%;padding:12px;background:var(--gelev);color:var(--gfg);border:1px solid var(--gbd);border-radius:999px;font-size:13px;cursor:pointer;font-family:inherit;margin-bottom:12px">Дамп DOM в консоль</button>
 <p style="color:var(--gmut);font-size:12px;margin:0 0 8px 0">Live-состояние:</p>
-<div style="background:var(--gelev);padding:10px 12px;border-radius:10px;font-family:ui-monospace,monospace;font-size:11px;color:var(--gmut);line-height:1.6;white-space:pre-wrap">stage: ${GR.detectStage()}
+<div style="background:var(--gelev);padding:10px 12px;border-radius:10px;font-family:ui-monospace,monospace;font-size:11px;color:var(--gmut);line-height:1.6;white-space:pre-wrap">host: ${location.hostname}
+stage: ${isAccounts() ? GR.detectStage() : '—'}
 GS.running: ${GS.running}
 GS.polling: ${GS.polling}
 GS.methodDone: ${GS.methodDone}
@@ -545,7 +558,7 @@ buttons: ${document.querySelectorAll('button').length}</div>
             const dump = dumpGrokDOM();
             console.log(dump);
             try { if (typeof GM_setClipboard !== 'undefined') GM_setClipboard(dump, 'text'); } catch {}
-            notify('Дамп Grok DOM скопирован (см. консоль)', 'ok', 4000);
+            notify('Дамп DOM скопирован (см. консоль)', 'ok', 4000);
         };
         setTimeout(() => am.focus(), 100);
     });
@@ -695,7 +708,7 @@ async function findCodeFor(gs) {
 
 // ═══════════════════ GROK MODULE ═══════════════════
 const GR = {
-    _ourIds: ['grok-menu', 'gr', 'gset', 'ghlp'],
+    _ourIds: ['grok-menu', 'gr', 'gset', 'ghlp', 'gc', 'gcp', 'gps'],
 
     findMethodEmailBtn() {
         const btns = [...document.querySelectorAll('button, a[role="button"], div[role="button"]')];
@@ -735,7 +748,6 @@ const GR = {
                [...document.querySelectorAll('input[type="password"]')].find(el => el.offsetParent !== null) ||
                null;
     },
-    // kind = 'email' | 'code' | 'profile' | undefined
     findSubmit(kind) {
         const btns = [...document.querySelectorAll('button[type="submit"]')];
         const filtered = btns.filter(b => {
@@ -1237,14 +1249,27 @@ function setStatus(t, c) {
     statusLbl.textContent = t || '';
     statusLbl.style.color = c || 'var(--gfg)';
 }
+
+// ОДИНАКОВАЯ позиция на ВСЕХ сайтах — слева, как было у ChatGPT
 function posMenu() {
     if (!menuBtn) return;
     const isMob = innerWidth < 768;
-    const left = isMob ? 8 : 12;
-    menuBtn.style.left = left + 'px'; menuBtn.style.right = 'auto'; menuBtn.style.top = '8px';
-    if (menuPnl) { menuPnl.style.left = left + 'px'; menuPnl.style.right = 'auto'; menuPnl.style.top = '52px'; }
-    if (statusLbl) { statusLbl.style.left = left + 'px'; statusLbl.style.right = 'auto'; statusLbl.style.top = '44px'; }
+    const left = isMob ? 52 : 56;
+    menuBtn.style.left = left + 'px';
+    menuBtn.style.right = 'auto';
+    menuBtn.style.top = '8px';
+    if (menuPnl) {
+        menuPnl.style.left = left + 'px';
+        menuPnl.style.right = 'auto';
+        menuPnl.style.top = '52px';
+    }
+    if (statusLbl) {
+        statusLbl.style.left = left + 'px';
+        statusLbl.style.right = 'auto';
+        statusLbl.style.top = '44px';
+    }
 }
+
 function setCanContinue(v) { canContinue = v; if (menuVis) updateMenu(); }
 function updateMenu() {
     if (!menuPnl) return;
@@ -1270,18 +1295,18 @@ function createMenu() {
     menuBtn.id = 'grok-menu';
     menuBtn.title = 'Grok Auto Register';
     menuBtn.innerHTML = ICO_MENU;
-    menuBtn.style.cssText = `position:fixed;top:8px;left:12px;z-index:99999;width:36px;height:36px;padding:0;background:transparent;color:var(--gfg);border:none;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s var(--gease)`;
+    menuBtn.style.cssText = `position:fixed;top:8px;left:56px;z-index:99999;width:36px;height:36px;padding:0;background:transparent;color:var(--gfg);border:none;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s var(--gease)`;
     menuBtn.onmouseenter = () => menuBtn.style.background = 'var(--ghov)';
     menuBtn.onmouseleave = () => menuBtn.style.background = 'transparent';
     menuBtn.onclick = e => { e.stopPropagation(); toggleMenu(); };
 
     statusLbl = document.createElement('div');
     statusLbl.id = 'grok-status';
-    statusLbl.style.cssText = 'position:fixed;top:44px;left:12px;font-size:10px;font-weight:600;color:var(--gfg);text-align:center;width:36px;pointer-events:none';
+    statusLbl.style.cssText = 'position:fixed;top:44px;left:56px;font-size:10px;font-weight:600;color:var(--gfg);text-align:center;width:36px;pointer-events:none';
 
     menuPnl = document.createElement('div');
     menuPnl.className = 'grok-gl grok-pnl';
-    menuPnl.style.cssText = 'position:fixed;top:52px;left:12px;z-index:99999;display:none;flex-direction:column;gap:4px;padding:8px;border-radius:var(--grad);min-width:230px;max-width:calc(100vw - 32px)';
+    menuPnl.style.cssText = 'position:fixed;top:52px;left:56px;z-index:99999;display:none;flex-direction:column;gap:4px;padding:8px;border-radius:var(--grad);min-width:230px;max-width:calc(100vw - 32px)';
 
     const mkBtn = (id, ico, txt, fn, d = 0, cls = '') => {
         const b = document.createElement('button');
@@ -1292,8 +1317,12 @@ function createMenu() {
         b.onclick = e => { e.stopPropagation(); fn(); };
         return b;
     };
-    menuPnl.appendChild(mkBtn('gr', ICO_REG, 'Регистрация Grok', () => { closeMenu(); startReg(); }, 0));
-    menuPnl.appendChild(mkBtn('gc', ICO_CONT, 'Продолжить', () => { closeMenu(); setCanContinue(false); runStage(); }, 40, 'grok-cont'));
+
+    // Кнопка «Регистрация Grok» — только на accounts.x.ai
+    if (isAccounts()) {
+        menuPnl.appendChild(mkBtn('gr', ICO_REG, 'Регистрация Grok', () => { closeMenu(); startReg(); }, 0));
+        menuPnl.appendChild(mkBtn('gc', ICO_CONT, 'Продолжить', () => { closeMenu(); setCanContinue(false); runStage(); }, 40, 'grok-cont'));
+    }
     menuPnl.appendChild(mkBtn('gcp', ICO_COPY, 'Копировать контекст', copyCtx, 80));
     menuPnl.appendChild(mkBtn('gps', ICO_PASTE, 'Вставить контекст', pasteCtx, 120));
     menuPnl.appendChild(mkBtn('gset', ICO_SET, 'Настройки', () => { closeMenu(); openSettings(); }, 160));
@@ -1356,6 +1385,12 @@ async function init() {
     if (dbg === true) C.debug = true;
     createMenu();
     await sleep(300);
+
+    // Автозапуск регистрации ТОЛЬКО на accounts.x.ai
+    if (!isAccounts()) {
+        logAlways('init', 'не accounts.x.ai — только меню');
+        return;
+    }
 
     const savedInbox = await load('gr_inbox');
     if (savedInbox?.id) {
