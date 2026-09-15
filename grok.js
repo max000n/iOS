@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      83.7
+// @version      83.8
 // @description  Авторегистрация Grok + копирование/вставка контекста
 // @author       You
 // @match        https://accounts.x.ai/*
@@ -91,6 +91,44 @@ function logError(tag, ...args) {
 addEventListener('error', e => logError('window', e.message + ' at ' + e.filename + ':' + e.lineno));
 addEventListener('unhandledrejection', e => logError('promise', e.reason?.message || String(e.reason)));
 
+// ═══════════════════ STORAGE ═══════════════════
+async function save(k, v) {
+    try {
+        await GM.setValue('cg_' + k, v);
+        return true;
+    } catch (e) {
+        logError('save', k + ': ' + (e.message || e));
+        return false;
+    }
+}
+
+async function load(k) {
+    try {
+        const v = await GM.getValue('cg_' + k, null);
+        return v;
+    } catch (e) {
+        logError('load', k + ': ' + (e.message || e));
+        return null;
+    }
+}
+
+// Загрузить ВСЕ ключи в C.xxx — вызывается при старте и перед открытием настроек
+async function loadKeys() {
+    C.amKey = (await load('amKey')) || '';
+    C.slKey = (await load('slKey')) || '';
+    C.slRelay = (await load('slRelay')) || '';
+    C.slDomain = (await load('slDomain')) || '';
+    C.slPrefix = (await load('slPrefix')) || '';
+    C.mode = (await load('mode')) || 'agentmail';
+    const dbg = await load('debug');
+    if (dbg === true) C.debug = true;
+    logAlways('loadKeys', 'mode=' + C.mode +
+        ' am=' + (C.amKey ? 'да' : 'нет') +
+        ' sl=' + (C.slKey ? 'да' : 'нет') +
+        ' relay=' + (C.slRelay || '—') +
+        ' domain=' + (C.slDomain || '—'));
+}
+
 // ═══════════════════ ДАМП DOM ═══════════════════
 function dumpGrokDOM() {
     const out = [];
@@ -153,7 +191,7 @@ async function buildReport() {
     const p = [];
     p.push('═══ GROK AUTO REGISTER — ОТЧЁТ ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия: 83.7');
+    p.push('Версия: 83.8');
     p.push('URL: ' + location.href);
     p.push('Хост: ' + location.hostname);
     p.push('Сайт: ' + (isAccounts() ? 'accounts.x.ai' : isGrokChat() ? 'grok.com (только меню)' : 'неизвестный'));
@@ -357,8 +395,6 @@ async function focusEl(el) {
     } catch {}
     await delay(50, 150);
 }
-const save = (k, v) => GM.setValue('cg_' + k, v).catch(() => false);
-const load = k => GM.getValue('cg_' + k, null).catch(() => null);
 
 async function typeHuman(el, txt) {
     if (!el) return;
@@ -447,9 +483,7 @@ async function loadSimpleLoginDomains(selectEl, btnEl) {
         let data;
         try { data = JSON.parse(r.responseText); } catch { notify('SimpleLogin: некорректный ответ', 'err', 6000); return; }
         const suffixes = Array.isArray(data.suffixes) ? data.suffixes : [];
-        // Только бесплатные
         const free = suffixes.filter(s => s && s.is_premium === false && !s.is_custom);
-        // Извлекаем домен из suffix: ".cat@d1.test" → "d1.test"
         const domains = [];
         for (const s of free) {
             const raw = String(s.suffix || '');
@@ -457,7 +491,6 @@ async function loadSimpleLoginDomains(selectEl, btnEl) {
             const dom = (at >= 0 ? raw.slice(at + 1) : raw).replace(/^\.+/, '').trim();
             if (dom && !domains.includes(dom)) domains.push(dom);
         }
-        // Заполняем select
         selectEl.innerHTML = '';
         if (!domains.length) {
             const opt = document.createElement('option');
@@ -477,7 +510,6 @@ async function loadSimpleLoginDomains(selectEl, btnEl) {
             opt.textContent = d;
             selectEl.appendChild(opt);
         }
-        // Если сохранённый домен есть в списке — выбрать
         if (C.slDomain && domains.includes(C.slDomain)) selectEl.value = C.slDomain;
         notify(`Загружено доменов: ${domains.length}`, 'ok', 4000);
     } catch (e) {
@@ -490,7 +522,10 @@ async function loadSimpleLoginDomains(selectEl, btnEl) {
 }
 
 // ═══════════════════ НАСТРОЙКИ ═══════════════════
-function openSettings() {
+async function openSettings() {
+    // ВАЖНО: всегда подтягиваем актуальные ключи из storage, чтобы поля не были пустыми
+    await loadKeys();
+
     return new Promise(res => {
         settingsModal?.remove();
         settingsModal = document.createElement('div');
@@ -531,7 +566,7 @@ function openSettings() {
 </select>
 <button type="button" id="slload" style="padding:0 16px;border-radius:12px;border:1px solid var(--gbd);background:var(--gelev);color:var(--gfg);cursor:pointer;font-family:inherit;font-size:13px;white-space:nowrap">Загрузить домены</button>
 </div>
-<p class="grok-hint">Список подгружается из SimpleLogin API. Только бесплатные домены (is_premium=false).</p>
+<p class="grok-hint">Список подгружается из SimpleLogin API. Только бесплатные домены.</p>
 <div style="height:12px"></div>
 <label class="grok-lbl">Префикс алиаса (опционально)</label>
 <input id="slprefix" class="grok-in" type="text" placeholder="оставьте пустым" autocomplete="off">
@@ -574,11 +609,12 @@ GS.consecutiveNoCode: ${GS.consecutiveNoCode}</div>
         const am = d.querySelector('#amin'), sl = d.querySelector('#slin'),
               sle = d.querySelector('#slemail'), sld = d.querySelector('#sldomain'), slp = d.querySelector('#slprefix'),
               sll = d.querySelector('#slload'), slB = d.querySelector('#slBlock');
+
+        // Заполняем поля из актуальных C.xxx
         if (C.amKey) am.value = C.amKey;
         if (C.slKey) sl.value = C.slKey;
         if (C.slRelay) sle.value = C.slRelay;
         if (C.slPrefix) slp.value = C.slPrefix;
-        // Если сохранён домен — добавим его в select до загрузки
         if (C.slDomain) {
             const opt = document.createElement('option');
             opt.value = C.slDomain;
@@ -586,8 +622,9 @@ GS.consecutiveNoCode: ${GS.consecutiveNoCode}</div>
             sld.appendChild(opt);
             sld.value = C.slDomain;
         }
-        // Кнопка загрузки доменов
+
         sll.onclick = () => loadSimpleLoginDomains(sld, sll);
+
         let mode = C.mode;
         const seg = d.querySelector('#gm'), btns = seg.querySelectorAll('button');
         const upd = () => {
@@ -596,38 +633,78 @@ GS.consecutiveNoCode: ${GS.consecutiveNoCode}</div>
         };
         upd();
         btns.forEach(b => b.onclick = () => { mode = b.dataset.m; upd(); });
+
         const sw = d.querySelector('#gsw');
         sw.onclick = async () => {
-            C.debug = !C.debug; await save('debug', C.debug);
+            C.debug = !C.debug;
+            await save('debug', C.debug);
             const dot = sw.firstElementChild;
             sw.style.background = C.debug ? 'var(--gfg)' : '#8e8e8e';
             dot.style.transform = 'translateX(' + (C.debug ? '16px' : '0') + ')';
             notify('Диагностика ' + (C.debug ? 'включена' : 'выключена'), 'info', 2500);
         };
+
         const close = r => { settingsModal.remove(); settingsModal = null; res(r); };
         d.querySelector('#gcs').onclick = () => close(null);
         d.querySelector('#gcancel').onclick = () => close(null);
         settingsModal.onclick = e => { if (e.target === settingsModal) close(null); };
+
+        // ВАЖНО: сохранение атомарное — сначала валидация, потом запись, потом обновление C.xxx
         d.querySelector('#gsave').onclick = async () => {
-            const ak = am.value.trim(), sk = sl.value.trim(),
-                  relay = sle.value.trim(), domain = sld.value.trim(), prefix = slp.value.trim();
+            const ak = am.value.trim();
+            const sk = sl.value.trim();
+            const relay = sle.value.trim();
+            const domain = sld.value.trim();
+            const prefix = slp.value.trim();
+
+            // Валидация ДО записи
             if (!ak) return notify('Укажите AgentMail API Key', 'err', 4000);
             if (mode === 'simplelogin' && !sk) return notify('Для SimpleLogin укажите API Key', 'err', 5000);
-            if (mode === 'simplelogin' && !relay) return notify('Укажите AgentMail email для SimpleLogin', 'err', 5000);
-            await save('amKey', ak); await save('slKey', sk || null); await save('slRelay', relay || null);
-            await save('slDomain', domain || null); await save('slPrefix', prefix || null); await save('mode', mode);
-            C.amKey = ak; C.slKey = sk; C.slRelay = relay; C.slDomain = domain; C.slPrefix = prefix; C.mode = mode;
+            if (mode === 'simplelogin' && !relay) return notify('Укажите AgentMail relay email для SimpleLogin', 'err', 5000);
+
+            // Запись — фиксируем результат
+            const okAm = await save('amKey', ak);
+            const okSl = await save('slKey', sk || '');
+            const okRelay = await save('slRelay', relay || '');
+            const okDomain = await save('slDomain', domain || '');
+            const okPrefix = await save('slPrefix', prefix || '');
+            const okMode = await save('mode', mode);
+
+            if (!okAm || !okSl || !okRelay || !okDomain || !okPrefix || !okMode) {
+                notify('Не все данные сохранились. Попробуйте ещё раз.', 'err', 6000);
+                return;
+            }
+
+            // Обновляем C.xxx
+            C.amKey = ak;
+            C.slKey = sk;
+            C.slRelay = relay;
+            C.slDomain = domain;
+            C.slPrefix = prefix;
+            C.mode = mode;
+
+            // Контрольная проверка: читаем обратно из storage
+            await loadKeys();
+
             notify('Настройки сохранены', 'ok', 3000);
+            logAlways('settings', 'saved and verified: mode=' + C.mode +
+                ' am=' + (C.amKey ? 'да' : 'нет') +
+                ' sl=' + (C.slKey ? 'да' : 'нет') +
+                ' relay=' + (C.slRelay || '—') +
+                ' domain=' + (C.slDomain || '—'));
             close(true);
         };
+
         d.querySelector('#gclr').onclick = async () => {
-            await save('amKey', null); await save('slKey', null); await save('slRelay', null);
-            await save('slDomain', null); await save('slPrefix', null); await save('mode', null);
+            await save('amKey', ''); await save('slKey', ''); await save('slRelay', '');
+            await save('slDomain', ''); await save('slPrefix', ''); await save('mode', 'agentmail');
             C.amKey = ''; C.slKey = ''; C.slRelay = ''; C.slDomain = ''; C.slPrefix = ''; C.mode = 'agentmail';
-            am.value = ''; sl.value = ''; sle.value = ''; sld.innerHTML = '<option value="">— не выбрано —</option>'; slp.value = '';
+            am.value = ''; sl.value = ''; sle.value = ''; slp.value = '';
+            sld.innerHTML = '<option value="">— не выбрано —</option>';
             mode = 'agentmail'; upd();
             notify('Ключи удалены', 'ok', 3000);
         };
+
         d.querySelector('#grepBtn').onclick = () => { settingsModal.remove(); settingsModal = null; copyReport(); };
         d.querySelector('#gdumpBtn').onclick = () => {
             const dump = dumpGrokDOM();
@@ -640,16 +717,8 @@ GS.consecutiveNoCode: ${GS.consecutiveNoCode}</div>
 }
 
 async function ensureKeys() {
-    const k = await load('amKey');
-    if (k) {
-        C.amKey = k;
-        C.slKey = (await load('slKey')) || '';
-        C.slRelay = (await load('slRelay')) || '';
-        C.slDomain = (await load('slDomain')) || '';
-        C.slPrefix = (await load('slPrefix')) || '';
-        C.mode = (await load('mode')) || 'agentmail';
-        return true;
-    }
+    await loadKeys();
+    if (C.amKey) return true;
     return !!(await openSettings());
 }
 
@@ -1254,7 +1323,7 @@ function showHelp() {
 <li>Капчу Cloudflare проходите вручную.</li>
 </ol>
 <h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600">📧 SimpleLogin</h3>
-<p style="margin:0 0 12px 0;color:var(--gmut);font-size:13px">Домены подгружаются кнопкой «Загрузить домены» из API — только бесплатные. Если xAI блокирует домен — выберите другой из списка или укажите свой.</p>
+<p style="margin:0 0 12px 0;color:var(--gmut);font-size:13px">Домены подгружаются кнопкой «Загрузить домены» из API — только бесплатные.</p>
 </div>`;
     helpModal.appendChild(m);
     document.body.appendChild(helpModal);
@@ -1451,6 +1520,8 @@ function createMenu() {
 // ═══════════════════ СТАРТ ═══════════════════
 async function startReg() {
     logAlways('startReg', 'Grok');
+    await loadKeys();
+
     GS.methodDone = false; GS.emailDone = false; GS.codeDone = false; GS.profileDone = false; GS.regDone = false;
     GS.turnstileSolved = false; GS.detectedStage = null; GS.lastError = null;
     const choice = await startDialog();
@@ -1482,8 +1553,10 @@ async function init() {
     inited = true;
     logAlways('init', 'start host=' + location.hostname + ' path=' + location.pathname);
     injectCSS();
-    const dbg = await load('debug');
-    if (dbg === true) C.debug = true;
+
+    // ЗАГРУЖАЕМ ВСЕ КЛЮЧИ СРАЗУ — до всего остального
+    await loadKeys();
+
     createMenu();
     await sleep(300);
 
