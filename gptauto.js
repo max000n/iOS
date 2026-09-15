@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      75.0
+// @version      77.0
 // @description  Авторегистрация ChatGPT через AgentMail.to / SimpleLogin + расширенная диагностика
 // @author       You
 // @match        https://chatgpt.com/*
@@ -36,7 +36,6 @@ let codeDone = false, profileDone = false, regDone = false,
     helpModal = null, settingsModal = null, ctx = null,
     notifyDone = false, canContinue = false;
 
-// Статистика проверки почты
 const verifyStats = {
     attempts: 0, lastReason: null, lastMsgCount: 0,
     lastCode: null, lastCodeAge: null,
@@ -89,7 +88,7 @@ async function buildReport() {
     const p = [];
     p.push('═══ CHATGPT AUTO REGISTER — ОТЧЁТ ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия скрипта: 75.0');
+    p.push('Версия скрипта: 77.0');
     p.push('URL: ' + location.href);
     p.push('User Agent: ' + navigator.userAgent);
     p.push('Платформа: ' + navigator.platform + ' | Mobile: ' + (innerWidth < 768));
@@ -148,8 +147,7 @@ async function buildReport() {
     p.push('detect(): ' + detect());
     p.push('hasLoginBtn: ' + hasLoginBtn());
     p.push('loggedIn: ' + loggedIn());
-    const lg = findLogo();
-    p.push('logo: ' + (lg ? 'есть @ right=' + Math.round(lg.getBoundingClientRect().right) : 'нет'));
+    p.push('menuBtn.left: ' + (menuBtn ? menuBtn.style.left : 'нет'));
     p.push('');
     p.push('─── ОШИБКИ (' + diagErrors.length + ') ───');
     if (!diagErrors.length) p.push('(нет)');
@@ -448,7 +446,6 @@ function openSettings() {
             notify('Ключи удалены', 'ok', 3000);
         };
 
-        // Диагностика
         const sw = d.querySelector('#gsw');
         sw.onclick = async () => {
             C.debug = !C.debug;
@@ -729,6 +726,13 @@ const onLogin = () => location.hostname.includes('auth.openai.com') || !!findEma
 const onProfile = () => { const f = findProfile(); return !!(f.name && f.age); };
 const onAboutYou = () => /about-you|profile|onboarding/i.test(location.href);
 
+function currentAccountId() {
+    const el = document.querySelector('[data-testid="user-menu"]') ||
+               document.querySelector('button[aria-label*="меню" i]') ||
+               document.querySelector('nav[aria-label="Боковая панель"] button[aria-label*="аккаунт" i]');
+    return el ? (el.textContent || '').trim().slice(0, 40) : 'unknown';
+}
+
 // ═══════════════════ ДИАЛОГ ═══════════════════
 function emailDialog() {
     return new Promise(async res => {
@@ -819,28 +823,11 @@ function setStatus(t, c) {
     statusLbl.style.color = c || 'var(--gfg)';
 }
 
-function findLogo() {
-    for (const s of ['[data-testid="desktop-app-shell"] > section > header svg',
-                     '[data-sidebar-blossom]', '._wordmarkLink_xjnzp_1',
-                     'a[href="https://chatgpt.com"] svg', 'header svg']) {
-        const el = document.querySelector(s);
-        if (el && el.getBoundingClientRect().width > 0) return el;
-    }
-    return null;
-}
-
-let lastPos = null;
 function posMenu() {
     if (!menuBtn) return;
     const isMob = innerWidth < 768;
-    let left = isMob ? 56 : 64;
-    const logo = findLogo();
-    if (logo) {
-        const r = logo.getBoundingClientRect();
-        if (r.width > 0 && r.right > 0) left = Math.round(r.right + 8);
-    }
-    if (lastPos === left) return;
-    lastPos = left;
+    const left = isMob ? 52 : 56;
+    if (menuBtn.style.left === left + 'px') return;
     menuBtn.style.left = left + 'px';
     if (menuPnl) menuPnl.style.left = left + 'px';
     if (statusLbl) statusLbl.style.left = left + 'px';
@@ -852,7 +839,8 @@ function updateMenu() {
     const li = loggedIn();
     const r = menuPnl.querySelector('#gr'), cc = menuPnl.querySelector('#gc'),
           cp = menuPnl.querySelector('#gcp'), ps = menuPnl.querySelector('#gps');
-    if (r) r.style.display = (!li && !regDone) ? 'flex' : 'none';
+    // Регистрация видна всегда, когда не авторизован (сброс regDone произойдёт при клике)
+    if (r) r.style.display = !li ? 'flex' : 'none';
     if (cc) cc.style.display = canContinue ? 'flex' : 'none';
     if (cp) cp.style.display = li ? 'flex' : 'none';
     if (ps) ps.style.display = li ? 'flex' : 'none';
@@ -911,18 +899,18 @@ function createMenu() {
     menuBtn.id = 'gpt-menu';
     menuBtn.title = 'ChatGPT Auto Register';
     menuBtn.innerHTML = ICO_MENU;
-    menuBtn.style.cssText = `position:fixed;top:8px;left:64px;z-index:99999;width:36px;height:36px;padding:0;background:transparent;color:var(--gfg);border:none;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s var(--gease)`;
+    menuBtn.style.cssText = `position:fixed;top:8px;left:56px;z-index:99999;width:36px;height:36px;padding:0;background:transparent;color:var(--gfg);border:none;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s var(--gease)`;
     menuBtn.onmouseenter = () => menuBtn.style.background = 'var(--ghov)';
     menuBtn.onmouseleave = () => menuBtn.style.background = 'transparent';
     menuBtn.onclick = e => { e.stopPropagation(); toggleMenu(); };
 
     statusLbl = document.createElement('div');
     statusLbl.id = 'gpt-status';
-    statusLbl.style.cssText = 'position:fixed;top:44px;left:64px;font-size:10px;font-weight:600;color:var(--gfg);text-align:center;width:36px;pointer-events:none';
+    statusLbl.style.cssText = 'position:fixed;top:44px;left:56px;font-size:10px;font-weight:600;color:var(--gfg);text-align:center;width:36px;pointer-events:none';
 
     menuPnl = document.createElement('div');
     menuPnl.className = 'gpt-gl gpt-pnl';
-    menuPnl.style.cssText = 'position:fixed;top:52px;left:64px;z-index:99999;display:none;flex-direction:column;gap:4px;padding:8px;border-radius:var(--grad);min-width:230px;max-width:calc(100vw - 32px)';
+    menuPnl.style.cssText = 'position:fixed;top:52px;left:56px;z-index:99999;display:none;flex-direction:column;gap:4px;padding:8px;border-radius:var(--grad);min-width:230px;max-width:calc(100vw - 32px)';
 
     const mkBtn = (id, ico, txt, fn, d = 0, cls = '') => {
         const b = document.createElement('button');
@@ -944,12 +932,9 @@ function createMenu() {
     document.body.appendChild(menuPnl);
     document.body.appendChild(statusLbl);
 
-    posMenu();
-    setTimeout(posMenu, 100);
-    setTimeout(posMenu, 500);
-    setTimeout(posMenu, 1500);
     addEventListener('resize', posMenu);
-    setInterval(posMenu, 2000);
+    setInterval(posMenu, 3000);
+
     document.addEventListener('click', e => {
         if (menuPnl && menuPnl.style.display === 'flex' &&
             !menuPnl.contains(e.target) && !menuBtn.contains(e.target)) closeMenu();
@@ -1219,8 +1204,16 @@ async function runStage() {
 async function startReg() {
     log('INFO', 'startReg', 'called');
     if (running) { log('WARN', 'startReg', 'already running'); return; }
-    if (regDone) return notify('Уже зарегистрировано', 'info', 3000);
     if (loggedIn()) { log('WARN', 'startReg', 'user logged in'); return notify('Вы авторизованы. Выйдите.', 'warn', 6000); }
+
+    // ⚡ Принудительный сброс — новая регистрация всегда чистая
+    if (regDone) {
+        log('INFO', 'startReg', 'resetting regDone flag');
+        regDone = false;
+        notifyDone = false;
+        await save('complete', null);
+    }
+
     if (!await ensureKeys()) { log('WARN', 'startReg', 'no keys'); return notify('Настройка отменена', 'warn', 4000); }
 
     setStatus('Старт');
@@ -1266,12 +1259,38 @@ async function init() {
         if (inbox?.id) { verifyStats.inboxId = inbox.id; verifyStats.inboxEmail = inbox.email; }
         log('INFO', 'init', 'loaded: mode=' + C.mode + ' debug=' + C.debug + ' amKey=' + (C.amKey ? 'yes' : 'no'));
 
+        // ⚡ Обработка флага complete с учётом незавершённой сессии
         const comp = await load('complete');
-        if (comp && loggedIn()) { regDone = true; notifyDone = true; log('INFO', 'init', 'regDone restored'); }
-        else if (comp && !loggedIn()) { await save('complete', null); regDone = false; }
+        const pendingCode = await load('codeReqAt');
+        if (comp && loggedIn() && !pendingCode) {
+            regDone = true;
+            notifyDone = true;
+            log('INFO', 'init', 'regDone restored (completed, no pending)');
+        } else if (comp) {
+            await save('complete', null);
+            regDone = false;
+            notifyDone = false;
+            log('INFO', 'init', 'regDone reset (comp=' + comp + ' loggedIn=' + loggedIn() + ' pendingCode=' + !!pendingCode + ')');
+        }
+
+        // ⚡ Сброс при смене аккаунта
+        const prevAcc = await load('account');
+        const currAcc = currentAccountId();
+        if (prevAcc && currAcc && prevAcc !== currAcc) {
+            log('INFO', 'init', 'account changed: ' + prevAcc + ' → ' + currAcc + ', resetting state');
+            await save('complete', null);
+            await save('inbox', null);
+            await save('email', null);
+            await save('codeReqAt', null);
+            regDone = false;
+            notifyDone = false;
+            inbox = null;
+            codeReqAt = null;
+        }
+        await save('account', currAcc);
 
         createMenu();
-        log('INFO', 'init', 'menu created');
+        log('INFO', 'init', 'menu created at left=' + menuBtn.style.left);
 
         let lastUrl = location.href;
         setInterval(() => {
