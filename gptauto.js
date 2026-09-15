@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Auto Register (AgentMail + SimpleLogin)
 // @namespace    http://tampermonkey.net/
-// @version      67.0
-// @description  Авторегистрация ChatGPT через AgentMail.to + стиль ChatGPT + авто-переход
+// @version      68.0
+// @description  Авторегистрация ChatGPT через AgentMail.to + пароль-этап + стиль ChatGPT
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://auth.openai.com/*
@@ -34,13 +34,13 @@
 
     let codeInserted = false, profileFilled = false, registrationComplete = false,
         isRunning = false, loginAttempted = false, verifyCompleted = false,
-        initDone = false, currentInbox = null, pollingActive = false;
+        passwordFilled = false, initDone = false, currentInbox = null, pollingActive = false;
 
     let codeRequestedAt = null, usedMessageIds = new Set(), urlWatcher = null;
     let helpModal = null, settingsModal = null, savedContext = null;
 
     // ============================================
-    // CSS: тема ChatGPT, стекло, анимации
+    // CSS
     // ============================================
     function injectThemeStyles() {
         if (document.getElementById('gpt-auto-theme-styles')) return;
@@ -119,9 +119,7 @@
                 to   { opacity: 1; transform: translateX(0); }
             }
 
-            .gpt-menu-panel {
-                animation: gptMenuIn .25s var(--gpt-ease) both;
-            }
+            .gpt-menu-panel { animation: gptMenuIn .25s var(--gpt-ease) both; }
             .gpt-menu-item {
                 animation: gptItemIn .3s var(--gpt-ease) both;
                 transition: background .15s var(--gpt-ease), transform .1s var(--gpt-ease);
@@ -194,7 +192,7 @@
     const getData  = async (k)    => { try { return await GM.getValue('chatgpt_helper_' + k, null); } catch { return null; } };
 
     // ============================================
-    // HTTP С РЕТРАЯМИ
+    // HTTP
     // ============================================
     function httpRequest(opts) {
         return new Promise((resolve) => {
@@ -544,6 +542,12 @@
         return c[0] || null;
     }
 
+    function findPasswordInput() {
+        const all = [...document.querySelectorAll('input[type="password"]')];
+        for (const el of all) if (el.offsetParent !== null || el.offsetWidth > 0) return el;
+        return null;
+    }
+
     function findCodeInput() {
         for (const sel of ['input[placeholder*="код" i]', 'input[placeholder*="code" i]', 'input[inputmode="numeric"]', 'input[autocomplete="one-time-code"]']) {
             const i = document.querySelector(sel);
@@ -591,10 +595,20 @@
     const generateAge = () => Math.floor(Math.random() * 21) + 25;
     const generateUserData = () => ({ firstName: ['Alex', 'Emma', 'James', 'Sophia', 'Michael', 'Olivia'][Math.floor(Math.random() * 6)] });
 
+    function generatePassword() {
+        const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        const special = '!@#$%&*';
+        let pwd = '';
+        for (let i = 0; i < 14; i++) pwd += chars[Math.floor(Math.random() * chars.length)];
+        pwd += special[Math.floor(Math.random() * special.length)];
+        pwd += Math.floor(Math.random() * 10);
+        return pwd;
+    }
+
     async function clickContinue() {
         for (const b of document.querySelectorAll('button, a, div[role="button"]')) {
             const t = b.textContent.trim().toLowerCase();
-            if (t === 'continue' || t === 'продолжить' || t === 'next' || t === 'далее') return await humanClick(b);
+            if (t === 'continue' || t === 'продолжить' || t === 'next' || t === 'далее' || t === 'create' || t === 'создать') return await humanClick(b);
         }
         return false;
     }
@@ -602,6 +616,8 @@
     function isUserLoggedIn() {
         if (document.querySelector('[data-testid="user-menu"], .user-menu')) return true;
         if (window.location.href.includes('/c/')) return true;
+        // На chatgpt.com — если мы не на странице авторизации и нет кнопки «Войти»
+        if (window.location.hostname.includes('chatgpt.com') && !hasLoginButton() && !findEmailInput()) return true;
         return false;
     }
 
@@ -640,7 +656,9 @@
             const old = await getData('currentInbox');
             dialog.querySelector('#oldEmailDisplay').textContent = old ? `📧 ${old.email}` : '';
             if (old) dialog.querySelector('#oldEmailBtn').style.display = 'block';
-            dialog.querySelector('#newEmailBtn').onclick = async () => { overlay.remove(); await saveData('currentInbox', null); resolve('new'); };
+
+            // ⚡ ИСПРАВЛЕНО: НЕ очищаем currentInbox здесь — stageLogin сам перезапишет
+            dialog.querySelector('#newEmailBtn').onclick = () => { overlay.remove(); resolve('new'); };
             dialog.querySelector('#oldEmailBtn').onclick = () => { overlay.remove(); resolve('old'); };
             dialog.querySelector('#cancelBtn').onclick = () => { overlay.remove(); resolve('cancel'); };
             overlay.onclick = (e) => { if (e.target === overlay) { overlay.remove(); resolve('cancel'); } };
@@ -665,28 +683,21 @@
             </div>
             <div style="line-height:1.6;font-size:14px;">
                 <div style="margin-bottom:22px;">
-                    <h3 style="margin:0 0 12px 0;font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">🔑 Шаг 1. Получение ключей</h3>
-                    <p style="margin:0 0 10px 0;"><b>AgentMail (обязательно):</b> console.agentmail.to → API Keys → Create New API Key</p>
-                    <p style="margin:0;"><b>SimpleLogin (опционально):</b> app.simplelogin.io/dashboard/api_key → Create</p>
+                    <h3 style="margin:0 0 12px 0;font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">🔑 Шаг 1. Ключи</h3>
+                    <p style="margin:0 0 10px 0;"><b>AgentMail:</b> console.agentmail.to → API Keys → Create</p>
+                    <p style="margin:0;"><b>SimpleLogin (опционально):</b> app.simplelogin.io/dashboard/api_key</p>
                 </div>
                 <div style="margin-bottom:22px;">
-                    <h3 style="margin:0 0 12px 0;font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">⚙️ Шаг 2. Настройка</h3>
-                    <p style="margin:0;">☰ → Настройки → выберите режим → вставьте ключи → Сохранить.</p>
-                </div>
-                <div style="margin-bottom:22px;">
-                    <h3 style="margin:0 0 12px 0;font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">📧 Режим SimpleLogin</h3>
+                    <h3 style="margin:0 0 12px 0;font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">🚀 Регистрация</h3>
                     <ol style="margin:0;padding-left:20px;">
-                        <li>Создайте постоянный inbox в AgentMail (не удаляйте его).</li>
-                        <li>В SimpleLogin → Mailboxes → Add Mailbox → укажите адрес AgentMail.</li>
-                        <li>Подтвердите письмо, сделайте дефолтным.</li>
+                        <li>Откройте chatgpt.com (не авторизованы).</li>
+                        <li>☰ → Регистрация → «Новая регистрация».</li>
+                        <li>Скрипт сам создаст почту, введёт email, дождётся кода, вставит код, при необходимости создаст пароль и заполнит профиль.</li>
+                        <li>Пароль будет показан в уведомлении — сохраните его.</li>
                     </ol>
                 </div>
-                <div style="margin-bottom:22px;">
-                    <h3 style="margin:0 0 12px 0;font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">🚀 Шаг 3. Регистрация</h3>
-                    <p style="margin:0;">chatgpt.com → ☰ → Регистрация → «Новая регистрация».</p>
-                </div>
                 <div>
-                    <h3 style="margin:0 0 12px 0;font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">📋 Перенос контекста</h3>
+                    <h3 style="margin:0 0 12px 0;font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">📋 Контекст</h3>
                     <p style="margin:0;">☰ → Копировать контекст → выход → новая регистрация → ☰ → Вставить контекст.</p>
                 </div>
             </div>
@@ -698,7 +709,7 @@
     }
 
     // ============================================
-    // МЕНЮ (стиль ChatGPT, слева от логотипа)
+    // МЕНЮ
     // ============================================
     let menuButton = null, menuPanel = null, menuVisible = false;
     let statusLabel = null;
@@ -800,7 +811,11 @@
         const copy = menuPanel.querySelector('#gpt-copy-btn');
         const paste = menuPanel.querySelector('#gpt-paste-btn');
 
-        if (register) register.style.display = registrationComplete ? 'none' : 'flex';
+        // ⚡ Скрываем регистрацию, если авторизованы ИЛИ регистрация завершена
+        if (register) {
+            const shouldHide = loggedIn || registrationComplete;
+            register.style.display = shouldHide ? 'none' : 'flex';
+        }
         if (copy) copy.style.display = loggedIn ? 'flex' : 'none';
         if (paste) paste.style.display = loggedIn ? 'flex' : 'none';
     }
@@ -810,7 +825,6 @@
         if (!document.body) return;
 
         const isMobile = window.innerWidth < 768;
-        // На мобильных ставим справа от родного гамбургера (он обычно на left: 16px)
         const leftPos = isMobile ? '56px' : '64px';
 
         menuButton = document.createElement('button');
@@ -831,14 +845,6 @@
             display:flex; align-items:center; justify-content:center;
             transition: transform .18s var(--gpt-ease), box-shadow .18s var(--gpt-ease);
         `;
-        menuButton.addEventListener('mouseenter', () => {
-            menuButton.style.transform = 'scale(1.04)';
-            menuButton.style.boxShadow = '0 6px 20px var(--gpt-shadow)';
-        });
-        menuButton.addEventListener('mouseleave', () => {
-            menuButton.style.transform = 'scale(1)';
-            menuButton.style.boxShadow = '0 8px 32px var(--gpt-shadow)';
-        });
         menuButton.onclick = (e) => { e.stopPropagation(); toggleMenu(); };
 
         statusLabel = menuButton.querySelector('#gpt-menu-status');
@@ -967,11 +973,34 @@
             await saveData('currentInbox', currentInbox);
             await saveData('currentEmail', emailToUse);
         } else {
-            const saved = await getData('currentInbox');
-            if (!saved) { showNotification('Нет сохранённой почты', 'error'); return; }
+            // ⚡ ИСПРАВЛЕНО: проверяем, что сохранённый ящик ещё существует
+            let saved = await getData('currentInbox');
+            if (!saved?.inboxId) {
+                showNotification('Нет сохранённой почты. Создайте новую.', 'warning', 6000);
+                setMenuStatus('', '');
+                return;
+            }
+
+            // Валидация через API
+            setMenuStatus('Проверяю ящик…', '#10a37f');
+            const inboxes = await listAgentMailInboxes();
+            const exists = inboxes.some(i =>
+                (i.inbox_id || i.email) === saved.inboxId ||
+                (i.inbox_id || i.email) === saved.email
+            );
+
+            if (!exists) {
+                showNotification('Прошлый ящик удалён. Создайте новую регистрацию.', 'warning', 8000);
+                await saveData('currentInbox', null);
+                await saveData('currentEmail', null);
+                setMenuStatus('', '');
+                return;
+            }
+
             currentInbox = saved;
             emailToUse = (await getData('currentEmail')) || saved.email;
             codeRequestedAt = await getData('codeRequestedAt') || Date.now();
+            showNotification(`Продолжаю с ${emailToUse}`, 'info', 4000);
         }
 
         let input = null;
@@ -988,6 +1017,37 @@
         startUrlWatcher(() => { if (!registrationComplete) runStage(); }, 12000);
     }
 
+    // ⚡ НОВЫЙ ЭТАП: создание пароля
+    async function stagePassword() {
+        if (passwordFilled || registrationComplete) return;
+        const input = findPasswordInput();
+        if (!input) {
+            // Поле исчезло — переходим дальше
+            if (!isRunning) { isRunning = false; runStage(); }
+            return;
+        }
+
+        let password = await getData('registrationPassword');
+        if (!password) {
+            password = generatePassword();
+            await saveData('registrationPassword', password);
+            showNotification(`🔑 Пароль: ${password}`, 'warning', 20000);
+            try {
+                if (typeof GM_setClipboard !== 'undefined') GM_setClipboard(password, 'text');
+            } catch (e) {}
+        } else {
+            showNotification('Использую ранее сгенерированный пароль', 'info', 3000);
+        }
+
+        setMenuStatus('Ввожу пароль…', '#10a37f');
+        await typeLikeHuman(input, password);
+        passwordFilled = true;
+        await humanDelay(200, 500);
+        await clickContinue();
+
+        startUrlWatcher(() => { if (!registrationComplete) { isRunning = false; runStage(); } }, 15000);
+    }
+
     async function watchCodeResult() {
         const start = Date.now();
         const maxWait = 120000;
@@ -1002,8 +1062,13 @@
                 runStage();
                 return;
             }
+            if (findPasswordInput()) {
+                showNotification('Код принят. Переход к паролю…', 'success', 4000);
+                isRunning = false;
+                runStage();
+                return;
+            }
             if (isOnAboutYouPage()) {
-                showNotification('Код принят. Переход к профилю…', 'success', 4000);
                 isRunning = false;
                 runStage();
                 return;
@@ -1029,13 +1094,30 @@
         pollingActive = true;
 
         if (codeRequestedAt == null) codeRequestedAt = await getData('codeRequestedAt') || Date.now();
-        if (!currentInbox) currentInbox = await getData('currentInbox');
+
+        // ⚡ ИСПРАВЛЕНО: многоуровневое восстановление currentInbox
         if (!currentInbox?.inboxId) {
-            showNotification('Нет ящика для проверки', 'error');
-            pollingActive = false; return;
+            currentInbox = await getData('currentInbox');
+        }
+        if (!currentInbox?.inboxId) {
+            const email = await getData('currentEmail');
+            if (email) {
+                const inboxes = await listAgentMailInboxes();
+                const found = inboxes.find(i => (i.inbox_id || i.email) === email);
+                if (found) {
+                    currentInbox = { inboxId: found.inbox_id, email: found.inbox_id || found.email };
+                    await saveData('currentInbox', currentInbox);
+                    showNotification('Ящик восстановлен из API', 'info', 4000);
+                }
+            }
+        }
+        if (!currentInbox?.inboxId) {
+            showNotification('Нет ящика для проверки. Создайте новую регистрацию.', 'error', 10000);
+            pollingActive = false;
+            return;
         }
 
-        showNotification(`Начинаю проверку почты (${currentInbox.email})`, 'info', 4000);
+        showNotification(`Начинаю проверку (${currentInbox.email})`, 'info', 4000);
 
         for (let i = 0; i < CONFIG.maxAttempts; i++) {
             const attempt = i + 1;
@@ -1111,7 +1193,18 @@
             await saveData('complete', true);
             showNotification('Регистрация завершена!', 'success', 8000);
             setMenuStatus('Готово', '#10a37f');
-            updateMenuItems();
+
+            // ⚡ Скрываем пункт регистрации
+            if (menuPanel) {
+                const register = menuPanel.querySelector('#gpt-register-btn');
+                if (register) register.style.display = 'none';
+            }
+
+            // ⚡ Очищаем все сохранённые данные регистрации
+            await saveData('currentInbox', null);
+            await saveData('currentEmail', null);
+            await saveData('codeRequestedAt', null);
+            await saveData('registrationPassword', null);
 
             if (CONFIG.deleteInboxAfterUse && CONFIG.emailMode !== 'simplelogin' && currentInbox?.inboxId) {
                 const deleted = await deleteAgentMailInbox(currentInbox.inboxId);
@@ -1127,6 +1220,7 @@
         if (window.location.hostname.includes('auth.openai.com') || isOnAboutYouPage()) {
             if (isOnProfilePage()) return 'profile';
             if (findCodeInputs()) return 'verify';
+            if (findPasswordInput() && !findEmailInput()) return 'password';
             if (findEmailInput()) return 'login';
         }
         return 'unknown';
@@ -1140,6 +1234,7 @@
             if (stage === 'main') await stageMain();
             else if (stage === 'login') await stageLogin();
             else if (stage === 'verify') await stageVerify();
+            else if (stage === 'password') await stagePassword();
             else if (stage === 'profile') await stageProfile();
         } catch (e) {
             showNotification(`Ошибка: ${e.message}`, 'error');
@@ -1160,7 +1255,7 @@
         if (!hasKeys) { showNotification('Настройка отменена', 'warning', 4000); return; }
 
         setMenuStatus('Запуск…', '#10a37f');
-        loginAttempted = false; verifyCompleted = false; codeInserted = false;
+        loginAttempted = false; verifyCompleted = false; codeInserted = false; passwordFilled = false;
         isRunning = false;
         try {
             await runStage();
@@ -1170,7 +1265,7 @@
     }
 
     // ============================================
-    // INIT (с ожиданием body и защитой от ошибок)
+    // INIT
     // ============================================
     function waitForBody() {
         return new Promise(resolve => {
@@ -1199,7 +1294,8 @@
             savedContext = await getData('savedContext');
             currentInbox = await getData('currentInbox');
 
-            if (await getData('complete') && isUserLoggedIn()) registrationComplete = true;
+            // ⚡ Восстанавливаем registrationComplete из storage
+            if (await getData('complete')) registrationComplete = true;
 
             createMenu();
 
