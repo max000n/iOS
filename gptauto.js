@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      79.0
+// @version      80.0
 // @description  Авторегистрация ChatGPT через AgentMail.to / SimpleLogin + диагностика + авто-запуск verify
 // @author       You
 // @match        https://chatgpt.com/*
@@ -21,6 +21,7 @@
 const C = {
     amKey: '', amBase: 'https://api.agentmail.to/v0',
     slKey: '', slBase: 'https://app.simplelogin.io',
+    slRelay: '',   // email постоянного ящика, привязанного в SimpleLogin
     mode: 'agentmail',
     interval: 3000, maxTries: 120, tolMs: 60000,
     fast: true, delInbox: true, retries: 3, shift: true,
@@ -86,7 +87,7 @@ async function buildReport() {
     const p = [];
     p.push('═══ CHATGPT AUTO REGISTER — ОТЧЁТ ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия скрипта: 79.0');
+    p.push('Версия скрипта: 80.0');
     p.push('URL: ' + location.href);
     p.push('Host: ' + location.hostname);
     p.push('Path: ' + location.pathname);
@@ -126,6 +127,7 @@ async function buildReport() {
     p.push('');
     p.push('─── КОНФИГ ───');
     p.push('mode: ' + C.mode);
+    p.push('slRelay: ' + (C.slRelay || 'не задан'));
     p.push('debug: ' + C.debug);
     p.push('fast: ' + C.fast);
     p.push('shift: ' + C.shift);
@@ -383,8 +385,12 @@ function openSettings() {
 <div id="slBlock" style="display:none">
 <label class="gpt-lbl">SimpleLogin API Key <span style="color:var(--gmut)">*</span></label>
 <input id="slin" class="gpt-in" type="password" placeholder="sl_..." autocomplete="off">
-<p class="gpt-hint">app.simplelogin.io/dashboard/api_key<br>
-<span style="opacity:.8">SimpleLogin создаёт алиас → AgentMail. Постоянный inbox привяжите как mailbox вручную.</span></p></div>
+<p class="gpt-hint">app.simplelogin.io/dashboard/api_key</p>
+<div style="height:12px"></div>
+<label class="gpt-lbl">AgentMail email для проверки <span style="color:var(--gmut)">*</span></label>
+<input id="slemail" class="gpt-in" type="email" placeholder="relay@agentmail.to" autocomplete="off">
+<p class="gpt-hint">Адрес постоянного inbox, привязанного в SimpleLogin → Mailboxes.<br>
+<span style="opacity:.8">Не удаляйте этот ящик — иначе алиасы SimpleLogin перестанут работать.</span></p></div>
 <div style="height:16px"></div>
 <div style="border-top:1px solid var(--gbd);padding-top:16px">
 <label class="gpt-lbl">Диагностика</label>
@@ -403,10 +409,12 @@ function openSettings() {
         document.body.appendChild(settingsModal);
 
         const am = d.querySelector('#amin'), sl = d.querySelector('#slin'),
+              sle = d.querySelector('#slemail'),
               amL = d.querySelector('#amlbl'), amH = d.querySelector('#amhint'),
               slB = d.querySelector('#slBlock');
         if (C.amKey) am.value = C.amKey;
         if (C.slKey) sl.value = C.slKey;
+        if (C.slRelay) sle.value = C.slRelay;
 
         let mode = C.mode;
         const seg = d.querySelector('#gm'), btns = seg.querySelectorAll('button');
@@ -429,19 +437,23 @@ function openSettings() {
         d.querySelector('#gcancel').onclick = () => close(null);
         settingsModal.onclick = e => { if (e.target === settingsModal) close(null); };
         d.querySelector('#gsave').onclick = async () => {
-            const ak = am.value.trim(), sk = sl.value.trim();
+            const ak = am.value.trim(), sk = sl.value.trim(), relay = sle.value.trim();
             if (!ak) return notify('Укажите AgentMail API Key', 'err', 4000);
             if (mode === 'simplelogin' && !sk) return notify('Для SimpleLogin укажите API Key', 'err', 5000);
-            await save('amKey', ak); await save('slKey', sk || null); await save('mode', mode);
-            C.amKey = ak; C.slKey = sk; C.mode = mode;
-            log('INFO', 'settings', 'saved mode=' + mode);
+            if (mode === 'simplelogin' && !relay) return notify('Укажите AgentMail email для SimpleLogin', 'err', 5000);
+            await save('amKey', ak);
+            await save('slKey', sk || null);
+            await save('slRelay', relay || null);
+            await save('mode', mode);
+            C.amKey = ak; C.slKey = sk; C.slRelay = relay; C.mode = mode;
+            log('INFO', 'settings', 'saved mode=' + mode + ' relay=' + relay);
             notify('Настройки сохранены', 'ok', 3000);
             close(true);
         };
         d.querySelector('#gclr').onclick = async () => {
-            await save('amKey', null); await save('slKey', null); await save('mode', null);
-            C.amKey = ''; C.slKey = ''; C.mode = 'agentmail';
-            am.value = ''; sl.value = ''; mode = 'agentmail'; upd();
+            await save('amKey', null); await save('slKey', null); await save('slRelay', null); await save('mode', null);
+            C.amKey = ''; C.slKey = ''; C.slRelay = ''; C.mode = 'agentmail';
+            am.value = ''; sl.value = ''; sle.value = ''; mode = 'agentmail'; upd();
             notify('Ключи удалены', 'ok', 3000);
         };
 
@@ -470,6 +482,7 @@ async function ensureKeys() {
     if (k) {
         C.amKey = k;
         C.slKey = (await load('slKey')) || '';
+        C.slRelay = (await load('slRelay')) || '';
         C.mode = (await load('mode')) || 'agentmail';
         return true;
     }
@@ -774,38 +787,98 @@ function showHelp() {
     helpModal.style.cssText = 'position:fixed;inset:0;background:var(--govl);z-index:999999;display:flex;align-items:center;justify-content:center;animation:gFd .2s var(--gease) both';
     const m = document.createElement('div');
     m.className = 'gpt-gl';
-    m.style.cssText = 'padding:24px;border-radius:20px;max-width:640px;width:90%;max-height:80vh;overflow-y:auto;color:var(--gfg);animation:gIn .3s var(--gease) both';
+    m.style.cssText = 'padding:24px;border-radius:20px;max-width:680px;width:92%;max-height:85vh;overflow-y:auto;color:var(--gfg);animation:gIn .3s var(--gease) both';
     m.innerHTML = `
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
-<h2 style="margin:0;font-size:20px;font-weight:600">Помощь</h2>
+<h2 style="margin:0;font-size:20px;font-weight:600">Помощь — ChatGPT Auto Register</h2>
 <button id="ch" style="background:none;border:none;font-size:24px;cursor:pointer;color:var(--gmut);padding:0 5px">×</button></div>
 <div style="line-height:1.6;font-size:14px">
+
 <div style="margin-bottom:22px">
-<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600">🔑 Ключи</h3>
-<p style="margin:0 0 10px 0"><b>AgentMail:</b> console.agentmail.to → API Keys → Create</p>
-<p style="margin:0"><b>SimpleLogin:</b> app.simplelogin.io/dashboard/api_key</p></div>
+<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">⚙️ Шаг 1. Настройка</h3>
+<p style="margin:0 0 10px 0;color:var(--gmut);font-size:13px">Откройте <b style="color:var(--gfg)">☰ → Настройки</b> и заполните:</p>
+<p style="margin:0 0 6px 0"><b>Режим «AgentMail»</b> (по умолчанию):</p>
+<ul style="margin:0 0 12px 0;padding-left:20px;color:var(--gmut);font-size:13px">
+<li><b style="color:var(--gfg)">AgentMail API Key</b> — console.agentmail.to → API Keys → Create</li>
+</ul>
+<p style="margin:0 0 6px 0"><b>Режим «SimpleLogin»</b>:</p>
+<ul style="margin:0;padding-left:20px;color:var(--gmut);font-size:13px">
+<li><b style="color:var(--gfg)">AgentMail API Key</b> — тот же, что выше (используется как relay)</li>
+<li><b style="color:var(--gfg)">SimpleLogin API Key</b> — app.simplelogin.io/dashboard/api_key</li>
+<li><b style="color:var(--gfg)">AgentMail email для проверки</b> — адрес постоянного ящика, привязанного в SimpleLogin</li>
+</ul>
+</div>
+
 <div style="margin-bottom:22px">
-<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600">📧 Режим SimpleLogin</h3>
+<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">📧 Шаг 2. Режим SimpleLogin (одноразово)</h3>
+<p style="margin:0 0 10px 0;color:var(--gmut);font-size:13px">Перед использованием SimpleLogin нужно вручную связать его с AgentMail:</p>
 <ol style="margin:0;padding-left:20px;color:var(--gmut);font-size:13px;line-height:1.7">
-<li>Создайте <b style="color:var(--gfg)">постоянный</b> inbox в AgentMail.</li>
-<li>В SimpleLogin → Mailboxes → Add Mailbox → укажите адрес.</li>
-<li>Подтвердите письмо, сделайте дефолтным.</li>
-<li>Скрипт создаст алиас SimpleLogin → письма идут в AgentMail.</li></ol></div>
+<li>Войдите в <b style="color:var(--gfg)">console.agentmail.to</b>.</li>
+<li>Создайте <b style="color:var(--gfg)">постоянный</b> inbox (например, <code>relay@agentmail.to</code>). <b style="color:var(--gfg)">Не удаляйте его</b>.</li>
+<li>В <b style="color:var(--gfg)">app.simplelogin.io → Mailboxes</b> нажмите <b style="color:var(--gfg)">Add Mailbox</b> и укажите этот адрес.</li>
+<li>Подтвердите письмо, сделайте mailbox <b style="color:var(--gfg)">дефолтным</b>.</li>
+<li>В настройках скрипта введите этот адрес в поле <b style="color:var(--gfg)">«AgentMail email для проверки»</b>.</li>
+</ol>
+<p style="margin:10px 0 0 0;color:var(--gdngr);font-size:12px">⚠ Не удаляйте указанный ящик в AgentMail — алиасы SimpleLogin перестанут работать.</p>
+</div>
+
 <div style="margin-bottom:22px">
-<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600">🚀 Регистрация</h3>
+<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">🚀 Шаг 3. Регистрация</h3>
 <ol style="margin:0;padding-left:20px;color:var(--gmut);font-size:13px;line-height:1.7">
-<li>chatgpt.com → ☰ → Регистрация → «Новая регистрация».</li>
-<li>Скрипт: создаст почту → введёт email → дождётся кода → введёт код → при необходимости создаст пароль → заполнит профиль.</li>
-<li>Если авто-переход не сработал — появится кнопка «Продолжить».</li>
-<li>Пароль показывается в уведомлении.</li></ol></div>
+<li>Откройте <b style="color:var(--gfg)">chatgpt.com</b> и убедитесь, что вы <b style="color:var(--gfg)">не авторизованы</b>.</li>
+<li>Нажмите <b style="color:var(--gfg)">☰ → Регистрация</b> (кнопка слева от логотипа).</li>
+<li>В диалоге выберите <b style="color:var(--gfg)">«Новая регистрация»</b>.</li>
+<li>Скрипт автоматически: создаст почту → введёт email → дождётся письма → введёт код → заполнит профиль.</li>
+<li>Пароль (если потребуется) показывается в уведомлении — сохраните его.</li>
+<li>После успеха временный ящик AgentMail удаляется автоматически (кроме SimpleLogin).</li>
+</ol>
+</div>
+
 <div style="margin-bottom:22px">
-<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600">📋 Контекст</h3>
-<p style="margin:0;color:var(--gmut);font-size:13px">☰ → Копировать контекст → выход → новая регистрация → ☰ → Вставить контекст.</p></div>
+<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">⏸ Кнопка «Продолжить»</h3>
+<p style="margin:0;color:var(--gmut);font-size:13px">
+Если авто-переход после ввода кода не сработал, в меню <b style="color:var(--gfg)">☰ → Продолжить</b> появится кнопка с пульсацией. Нажмите её — скрипт вручную перейдёт к следующему шагу. Также автозапуск срабатывает при обновлении страницы <code>auth.openai.com/email-verification</code>.
+</p>
+</div>
+
+<div style="margin-bottom:22px">
+<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">📋 Перенос контекста чата</h3>
+<ol style="margin:0;padding-left:20px;color:var(--gmut);font-size:13px;line-height:1.7">
+<li>В старом аккаунте: <b style="color:var(--gfg)">☰ → Копировать контекст</b>.</li>
+<li>Выйдите из аккаунта (Avatar → Log out).</li>
+<li>Зарегистрируйте новый аккаунт через <b style="color:var(--gfg)">☰ → Регистрация</b>.</li>
+<li>В новом чате: <b style="color:var(--gfg)">☰ → Вставить контекст</b>.</li>
+</ol>
+</div>
+
+<div style="margin-bottom:22px">
+<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">🔧 Диагностика</h3>
+<p style="margin:0 0 8px 0;color:var(--gmut);font-size:13px">
+<b style="color:var(--gfg)">☰ → Настройки → Подробный лог</b> — включает расширенное логирование всех HTTP-запросов, шагов проверки почты, извлечения кода и заполнения полей.<br>
+<b style="color:var(--gfg)">☰ → Настройки → Скопировать отчёт</b> — собирает в один текст: версию скрипта, URL, состояние всех флагов, конфиг (ключи замаскированы), DOM-проверки и последние 200 строк лога. Отчёт вставляется в чат для разбора проблемы.
+</p>
+<p style="margin:0;color:var(--gmut);font-size:12px">Рекомендуется включать диагностику перед разбором любой проблемы с регистрацией.</p>
+</div>
+
+<div style="margin-bottom:22px">
+<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">⚠️ Лимиты и ограничения</h3>
+<ul style="margin:0;padding-left:20px;color:var(--gmut);font-size:13px;line-height:1.7">
+<li><b style="color:var(--gfg)">AgentMail</b> — 3 ящика на бесплатном тарифе. При превышении скрипт автоматически удалит 2 самых старых и создаст новый.</li>
+<li><b style="color:var(--gfg)">SimpleLogin</b> — привязанный вручную relay-ящик <b style="color:var(--gfg)">не удаляется</b> после регистрации.</li>
+<li>Публичные временные почты (mail.tm и др.) <b style="color:var(--gfg)">не используются</b> — OpenAI их блокирует.</li>
+</ul>
+</div>
+
 <div>
-<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600">🔧 Диагностика</h3>
-<p style="margin:0 0 6px 0;color:var(--gmut);font-size:13px">
-Настройки → тумблер «Подробный лог» и кнопка «Скопировать отчёт».</p>
-<p style="margin:0;color:var(--gmut);font-size:12px">Отчёт содержит состояние почты, все HTTP-ответы и шаги заполнения кода.</p></div></div>`;
+<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">🛠 Управление ключами</h3>
+<ul style="margin:0;padding-left:20px;color:var(--gmut);font-size:13px;line-height:1.7">
+<li><b style="color:var(--gfg)">Изменить</b> — ☰ → Настройки → ввести новые → Сохранить.</li>
+<li><b style="color:var(--gfg)">Удалить</b> — ☰ → Настройки → «Удалить ключи».</li>
+<li><b style="color:var(--gfg)">Вручную</b> — Tampermonkey Dashboard → ChatGPT Auto Register → Storage.</li>
+</ul>
+</div>
+
+</div>`;
     helpModal.appendChild(m);
     document.body.appendChild(helpModal);
     m.querySelector('#ch').onclick = () => { helpModal.remove(); helpModal = null; };
@@ -992,10 +1065,21 @@ async function stageLogin() {
     if (choice === 'new') {
         setStatus('Почта…');
         if (C.mode === 'simplelogin') {
+            // ⚡ Используем email ящика, привязанного в SimpleLogin
+            if (!C.slRelay) {
+                notify('Не указан AgentMail email для SimpleLogin. Откройте Настройки.', 'err', 10000);
+                return setStatus('');
+            }
             const ib = await listInboxes();
             if (!ib.length) { notify('AgentMail: нет inbox', 'err', 12000); return setStatus(''); }
-            const r = ib[0];
-            inbox = { id: r.inbox_id, email: r.inbox_id || r.email };
+            const relay = ib.find(i => (i.inbox_id || i.email) === C.slRelay);
+            if (!relay) {
+                notify(`AgentMail: ящик ${C.slRelay} не найден. Проверьте настройки.`, 'err', 10000);
+                log('ERROR', 'stageLogin', 'relay inbox not found. Available: ' + ib.map(i => i.inbox_id || i.email).join(', '));
+                return setStatus('');
+            }
+            inbox = { id: relay.inbox_id, email: relay.inbox_id || relay.email };
+            log('INFO', 'stageLogin', 'using relay inbox: ' + inbox.email);
             notify('SimpleLogin: создаю алиас…', 'info', 4000);
             const alias = await createAlias();
             if (!alias) return setStatus('');
@@ -1253,6 +1337,11 @@ async function startReg() {
 
     if (!await ensureKeys()) { log('WARN', 'startReg', 'no keys'); return notify('Настройка отменена', 'warn', 4000); }
 
+    if (C.mode === 'simplelogin' && !C.slRelay) {
+        log('WARN', 'startReg', 'simplelogin mode without relay');
+        return notify('Укажите AgentMail email в Настройках для SimpleLogin', 'err', 8000);
+    }
+
     setStatus('Старт');
     loginTried = false; verifyDone = false; codeDone = false; pwdDone = false;
     notifyDone = false; setCanContinue(false);
@@ -1287,6 +1376,7 @@ async function init() {
 
         C.amKey = (await load('amKey')) || '';
         C.slKey = (await load('slKey')) || '';
+        C.slRelay = (await load('slRelay')) || '';
         C.mode = (await load('mode')) || 'agentmail';
         C.debug = (await load('debug')) || false;
         codeReqAt = await load('codeReqAt');
@@ -1294,7 +1384,7 @@ async function init() {
         ctx = await load('ctx');
         inbox = await load('inbox');
         if (inbox?.id) { verifyStats.inboxId = inbox.id; verifyStats.inboxEmail = inbox.email; }
-        log('INFO', 'init', 'loaded: mode=' + C.mode + ' debug=' + C.debug);
+        log('INFO', 'init', 'loaded: mode=' + C.mode + ' relay=' + (C.slRelay || 'нет') + ' debug=' + C.debug);
 
         const comp = await load('complete');
         const pendingCode = await load('codeReqAt');
