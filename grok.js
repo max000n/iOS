@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      83.6
+// @version      83.7
 // @description  Авторегистрация Grok + копирование/вставка контекста
 // @author       You
 // @match        https://accounts.x.ai/*
@@ -153,7 +153,7 @@ async function buildReport() {
     const p = [];
     p.push('═══ GROK AUTO REGISTER — ОТЧЁТ ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия: 83.6');
+    p.push('Версия: 83.7');
     p.push('URL: ' + location.href);
     p.push('Хост: ' + location.hostname);
     p.push('Сайт: ' + (isAccounts() ? 'accounts.x.ai' : isGrokChat() ? 'grok.com (только меню)' : 'неизвестный'));
@@ -426,6 +426,69 @@ function notify(text, type = 'info', dur = 5000) {
     }, dur);
 }
 
+// ═══════════════════ SIMPLELOGIN: ДОМЕНЫ ═══════════════════
+async function loadSimpleLoginDomains(selectEl, btnEl) {
+    if (!C.slKey) {
+        notify('Сначала укажите SimpleLogin API Key', 'warn', 4000);
+        return;
+    }
+    btnEl.disabled = true;
+    btnEl.textContent = 'Загрузка…';
+    try {
+        const r = await reqRetry({
+            method: 'GET',
+            url: `${C.slBase}/api/v5/alias/options`,
+            headers: { Authentication: C.slKey, Accept: 'application/json' },
+        }, 'SimpleLogin');
+        if (r.status !== 200) {
+            notify(`SimpleLogin: ${r.status} — не удалось загрузить домены`, 'err', 8000);
+            return;
+        }
+        let data;
+        try { data = JSON.parse(r.responseText); } catch { notify('SimpleLogin: некорректный ответ', 'err', 6000); return; }
+        const suffixes = Array.isArray(data.suffixes) ? data.suffixes : [];
+        // Только бесплатные
+        const free = suffixes.filter(s => s && s.is_premium === false && !s.is_custom);
+        // Извлекаем домен из suffix: ".cat@d1.test" → "d1.test"
+        const domains = [];
+        for (const s of free) {
+            const raw = String(s.suffix || '');
+            const at = raw.lastIndexOf('@');
+            const dom = (at >= 0 ? raw.slice(at + 1) : raw).replace(/^\.+/, '').trim();
+            if (dom && !domains.includes(dom)) domains.push(dom);
+        }
+        // Заполняем select
+        selectEl.innerHTML = '';
+        if (!domains.length) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = '— нет бесплатных доменов —';
+            selectEl.appendChild(opt);
+            notify('SimpleLogin: бесплатных доменов не найдено', 'warn', 6000);
+            return;
+        }
+        const blank = document.createElement('option');
+        blank.value = '';
+        blank.textContent = '— выберите домен —';
+        selectEl.appendChild(blank);
+        for (const d of domains) {
+            const opt = document.createElement('option');
+            opt.value = d;
+            opt.textContent = d;
+            selectEl.appendChild(opt);
+        }
+        // Если сохранённый домен есть в списке — выбрать
+        if (C.slDomain && domains.includes(C.slDomain)) selectEl.value = C.slDomain;
+        notify(`Загружено доменов: ${domains.length}`, 'ok', 4000);
+    } catch (e) {
+        logError('loadSLDomains', e);
+        notify('SimpleLogin: ошибка загрузки доменов', 'err', 8000);
+    } finally {
+        btnEl.disabled = false;
+        btnEl.textContent = 'Загрузить домены';
+    }
+}
+
 // ═══════════════════ НАСТРОЙКИ ═══════════════════
 function openSettings() {
     return new Promise(res => {
@@ -461,9 +524,14 @@ function openSettings() {
 <label class="grok-lbl">AgentMail relay email *</label>
 <input id="slemail" class="grok-in" type="email" placeholder="relay@agentmail.to" autocomplete="off">
 <div style="height:12px"></div>
-<label class="grok-lbl">Домен SimpleLogin (опционально)</label>
-<input id="sldomain" class="grok-in" type="text" placeholder="simplelogin.co" autocomplete="off">
-<p class="grok-hint">Свой домен, привязанный к SimpleLogin.</p>
+<label class="grok-lbl">Домен SimpleLogin (только бесплатные)</label>
+<div style="display:flex;gap:8px;align-items:stretch">
+<select id="sldomain" class="grok-in" style="flex:1;cursor:pointer">
+<option value="">— не выбрано —</option>
+</select>
+<button type="button" id="slload" style="padding:0 16px;border-radius:12px;border:1px solid var(--gbd);background:var(--gelev);color:var(--gfg);cursor:pointer;font-family:inherit;font-size:13px;white-space:nowrap">Загрузить домены</button>
+</div>
+<p class="grok-hint">Список подгружается из SimpleLogin API. Только бесплатные домены (is_premium=false).</p>
 <div style="height:12px"></div>
 <label class="grok-lbl">Префикс алиаса (опционально)</label>
 <input id="slprefix" class="grok-in" type="text" placeholder="оставьте пустым" autocomplete="off">
@@ -505,12 +573,21 @@ GS.consecutiveNoCode: ${GS.consecutiveNoCode}</div>
         });
         const am = d.querySelector('#amin'), sl = d.querySelector('#slin'),
               sle = d.querySelector('#slemail'), sld = d.querySelector('#sldomain'), slp = d.querySelector('#slprefix'),
-              slB = d.querySelector('#slBlock');
+              sll = d.querySelector('#slload'), slB = d.querySelector('#slBlock');
         if (C.amKey) am.value = C.amKey;
         if (C.slKey) sl.value = C.slKey;
         if (C.slRelay) sle.value = C.slRelay;
-        if (C.slDomain) sld.value = C.slDomain;
         if (C.slPrefix) slp.value = C.slPrefix;
+        // Если сохранён домен — добавим его в select до загрузки
+        if (C.slDomain) {
+            const opt = document.createElement('option');
+            opt.value = C.slDomain;
+            opt.textContent = C.slDomain + ' (сохранён)';
+            sld.appendChild(opt);
+            sld.value = C.slDomain;
+        }
+        // Кнопка загрузки доменов
+        sll.onclick = () => loadSimpleLoginDomains(sld, sll);
         let mode = C.mode;
         const seg = d.querySelector('#gm'), btns = seg.querySelectorAll('button');
         const upd = () => {
@@ -547,7 +624,8 @@ GS.consecutiveNoCode: ${GS.consecutiveNoCode}</div>
             await save('amKey', null); await save('slKey', null); await save('slRelay', null);
             await save('slDomain', null); await save('slPrefix', null); await save('mode', null);
             C.amKey = ''; C.slKey = ''; C.slRelay = ''; C.slDomain = ''; C.slPrefix = ''; C.mode = 'agentmail';
-            am.value = ''; sl.value = ''; sle.value = ''; sld.value = ''; slp.value = ''; mode = 'agentmail'; upd();
+            am.value = ''; sl.value = ''; sle.value = ''; sld.innerHTML = '<option value="">— не выбрано —</option>'; slp.value = '';
+            mode = 'agentmail'; upd();
             notify('Ключи удалены', 'ok', 3000);
         };
         d.querySelector('#grepBtn').onclick = () => { settingsModal.remove(); settingsModal = null; copyReport(); };
@@ -627,7 +705,7 @@ async function getMsg(id, mid) {
     try { return JSON.parse(r.responseText); } catch { return null; }
 }
 
-// ═══════════════════ SIMPLELOGIN ═══════════════════
+// ═══════════════════ SIMPLELOGIN: АЛИАСЫ ═══════════════════
 async function createAlias() {
     if (!C.slKey) { notify('SimpleLogin: ключ не задан', 'err'); return null; }
     const body = { note: 'Auto Register' };
@@ -766,7 +844,6 @@ const GR = {
             const b = filtered.find(b => b.textContent.trim().toLowerCase().includes(p));
             if (b) return b;
         }
-        // Fallback только для 'email' — там обычно одна кнопка. Для 'code'/'profile' — null, чтобы не кликнуть не ту.
         if (kind === 'email') return filtered[0] || null;
         return null;
     },
@@ -1177,7 +1254,7 @@ function showHelp() {
 <li>Капчу Cloudflare проходите вручную.</li>
 </ol>
 <h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600">📧 SimpleLogin</h3>
-<p style="margin:0 0 12px 0;color:var(--gmut);font-size:13px">Если xAI блокирует домен simplelogin — укажите свой домен (например <code>sl.mysite.com</code>) в настройках.</p>
+<p style="margin:0 0 12px 0;color:var(--gmut);font-size:13px">Домены подгружаются кнопкой «Загрузить домены» из API — только бесплатные. Если xAI блокирует домен — выберите другой из списка или укажите свой.</p>
 </div>`;
     helpModal.appendChild(m);
     document.body.appendChild(helpModal);
@@ -1188,8 +1265,6 @@ function showHelp() {
 // ═══════════════════ КОНТЕКСТ: КОПИРОВАТЬ ═══════════════════
 async function copyCtx() {
     const msgs = [];
-
-    // 1) Через атрибуты ролей (ChatGPT-стиль)
     for (const sel of ['[data-message-author-role]','[data-message-role]','[data-role]','[data-author-role]']) {
         const els = document.querySelectorAll(sel);
         if (!els.length) continue;
@@ -1206,8 +1281,6 @@ async function copyCtx() {
         });
         if (msgs.length) break;
     }
-
-    // 2) Grok-специфичные селекторы
     if (!msgs.length) {
         for (const sel of ['[class*="message-bubble"]','[class*="MessageBubble"]','[data-testid*="message"]','[data-testid*="Message"]']) {
             const els = document.querySelectorAll(sel);
@@ -1233,8 +1306,6 @@ async function copyCtx() {
             if (msgs.length) break;
         }
     }
-
-    // 3) Универсальный fallback по чётности
     if (!msgs.length) {
         let container = null;
         for (const sel of ['main [class*="conversation"]','main [class*="chat"]','[role="log"]','main']) {
@@ -1250,10 +1321,7 @@ async function copyCtx() {
             });
         }
     }
-
     if (!msgs.length) return notify('Не найдено сообщений', 'err');
-
-    // Убираем дубликаты
     const seen = new Set();
     const uniq = [];
     for (const m of msgs) {
@@ -1262,13 +1330,11 @@ async function copyCtx() {
         seen.add(key);
         uniq.push(m);
     }
-
     const text = uniq.map(m => {
         const label = m.role === 'user' ? 'Пользователь'
                     : m.role === 'assistant' ? 'Grok' : '?';
         return `[${label}]: ${m.text}`;
     }).join('\n\n');
-
     ctx = text;
     await save('ctx', text);
     try {
@@ -1288,7 +1354,6 @@ async function pasteCtx() {
         'div[contenteditable="true"],textarea,[contenteditable="true"]'
     );
     if (!inp) return notify('Поле ввода не найдено', 'err');
-
     inp.focus();
     await sleep(100);
     if (inp.tagName === 'TEXTAREA' || inp.tagName === 'INPUT') {
@@ -1296,7 +1361,6 @@ async function pasteCtx() {
         fireInput(inp, ctx);
         inp.dispatchEvent(new Event('change', { bubbles: true }));
     } else if (inp.isContentEditable) {
-        // ProseMirror / tiptap — используем execCommand для надёжности
         try {
             document.execCommand('selectAll', false, null);
             document.execCommand('insertText', false, ctx);
@@ -1336,7 +1400,6 @@ function toggleMenu() {
 
 function createMenu() {
     if (menuBtn || !document.body) return;
-    // Одинаковый отступ, как было у ChatGPT
     const left = innerWidth < 768 ? 52 : 56;
 
     menuBtn = document.createElement('button');
