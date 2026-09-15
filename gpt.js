@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      83.5
-// @description  Авторегистрация Grok через AgentMail.to / SimpleLogin
+// @version      83.6
+// @description  Авторегистрация Grok + копирование/вставка контекста
 // @author       You
 // @match        https://accounts.x.ai/*
 // @match        https://grok.com/*
@@ -19,24 +19,24 @@
 (function () {
 'use strict';
 
+// ═══════════════════ КОНФИГ ═══════════════════
 const C = {
     amKey: '', amBase: 'https://api.agentmail.to/v0',
     slKey: '', slBase: 'https://app.simplelogin.io',
-    slRelay: '',
-    slDomain: '',
-    slPrefix: '',
+    slRelay: '', slDomain: '', slPrefix: '',
     mode: 'agentmail',
     interval: 3000, maxTries: 120, tolMs: 60000,
     fast: true, retries: 3,
     debug: false,
 };
 
+// ═══════════════════ СОСТОЯНИЕ ═══════════════════
 const GS = {
     methodDone: false, emailDone: false, codeDone: false, profileDone: false, regDone: false,
     running: false, polling: false,
     inbox: null, codeReqAt: null, usedIds: new Set(),
     attempts: 0, lastReason: null, lastCode: null,
-    turnstileSolved: false, turnstileWaitStart: 0,
+    turnstileSolved: false,
     detectedStage: null,
     consecutiveNoCode: 0,
     lastError: null,
@@ -46,14 +46,12 @@ const GS = {
 let inited = false,
     helpModal = null,
     settingsModal = null,
-    ctx = null,
-    canContinue = false;
+    ctx = null;
 
-// ═══════════════════ САЙТ ═══════════════════
 const isAccounts = () => location.hostname === 'accounts.x.ai';
 const isGrokChat = () => location.hostname === 'grok.com' || location.hostname.endsWith('.grok.com');
 
-// ═══════════════════ ДИАГНОСТИКА ═══════════════════
+// ═══════════════════ ЛОГИ ═══════════════════
 const LOG_MAX = 800;
 const logBuf = [];
 let diagErrors = [];
@@ -76,23 +74,24 @@ function logAlways(tag, ...args) {
     console.log(line);
 }
 
-function log(level, tag, ...args) {
-    if (!C.debug && level !== 'ERROR') return;
+function logError(tag, ...args) {
     const msg = args.map(a => {
         if (a instanceof Error) return a.message + (a.stack ? '\n' + a.stack : '');
         if (typeof a === 'object') { try { return JSON.stringify(a); } catch { return String(a); } }
         return String(a);
     }).join(' ');
-    const line = `[${ts()}] [${level}] [${tag}] ${msg}`;
+    const line = `[${ts()}] [ERROR] [${tag}] ${msg}`;
     logBuf.push(line);
     if (logBuf.length > LOG_MAX) logBuf.shift();
-    if (level === 'ERROR') { diagErrors.push(line); if (diagErrors.length > 150) diagErrors.shift(); }
+    diagErrors.push(line);
+    if (diagErrors.length > 150) diagErrors.shift();
     console.log(line);
 }
 
-addEventListener('error', e => log('ERROR', 'window', e.message + ' at ' + e.filename + ':' + e.lineno));
-addEventListener('unhandledrejection', e => log('ERROR', 'promise', e.reason?.message || String(e.reason)));
+addEventListener('error', e => logError('window', e.message + ' at ' + e.filename + ':' + e.lineno));
+addEventListener('unhandledrejection', e => logError('promise', e.reason?.message || String(e.reason)));
 
+// ═══════════════════ ДАМП DOM ═══════════════════
 function dumpGrokDOM() {
     const out = [];
     const push = (label, val) => out.push(label + ': ' + val);
@@ -149,11 +148,12 @@ function dumpGrokDOM() {
     return out.join('\n');
 }
 
+// ═══════════════════ ОТЧЁТ ═══════════════════
 async function buildReport() {
     const p = [];
     p.push('═══ GROK AUTO REGISTER — ОТЧЁТ ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия: 83.5');
+    p.push('Версия: 83.6');
     p.push('URL: ' + location.href);
     p.push('Хост: ' + location.hostname);
     p.push('Сайт: ' + (isAccounts() ? 'accounts.x.ai' : isGrokChat() ? 'grok.com (только меню)' : 'неизвестный'));
@@ -184,10 +184,10 @@ async function buildReport() {
     p.push('mode: ' + C.mode + ' | slDomain: ' + (C.slDomain || '—') + ' | slPrefix: ' + (C.slPrefix || '—') + ' | slRelay: ' + (C.slRelay || '—'));
     p.push('amKey: ' + (C.amKey ? 'да' : 'нет') + ' | slKey: ' + (C.slKey ? 'да' : 'нет'));
     p.push('debug: ' + C.debug);
+    p.push('');
     if (isAccounts()) {
         p.push('detect(): ' + GR.detectStage());
         p.push('menuBtn.left: ' + (menuBtn ? menuBtn.style.left : '—'));
-        p.push('menuBtn.right: ' + (menuBtn ? menuBtn.style.right : '—'));
         p.push('');
         p.push('─── DOM ───');
         p.push('GR.hasMethodChoice(): ' + GR.hasMethodChoice());
@@ -234,7 +234,7 @@ async function copyReport() {
     try {
         if (typeof GM_setClipboard !== 'undefined') { GM_setClipboard(report, 'text'); ok = true; }
         else if (navigator.clipboard) { await navigator.clipboard.writeText(report); ok = true; }
-    } catch (e) { log('ERROR', 'copyReport', e); }
+    } catch (e) { logError('copyReport', e); }
     showReportModal(report, ok);
 }
 
@@ -251,13 +251,14 @@ function showReportModal(report, copied) {
 <h2 style="margin:0;font-size:17px;font-weight:600">Отчёт</h2>
 <button id="grmc" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--gmut);padding:0 5px">×</button></div>
 <p style="margin:0 0 10px 0;font-size:12px;color:var(--gmut)">${copied ? '✓ Скопировано.' : '⚠ Буфер недоступен.'} Размер: ${report.length}</p>
-<textarea id="grmt" readonly style="flex:1;min-height:480px;width:100%;padding:12px;border-radius:10px;border:1px solid var(--gbd);background:var(--gelev);color:var(--gfg);font-family:ui-monospace,monospace;font-size:11px;resize:vertical;box-sizing:border-box">${report.replace(/</g, '<')}</textarea>
+<textarea id="grmt" readonly style="flex:1;min-height:480px;width:100%;padding:12px;border-radius:10px;border:1px solid var(--gbd);background:var(--gelev);color:var(--gfg);font-family:ui-monospace,monospace;font-size:11px;resize:vertical;box-sizing:border-box"></textarea>
 <div style="display:flex;gap:10px;margin-top:12px">
 <button id="grmc2" style="flex:1;padding:12px;background:var(--gacc);color:var(--gaccf);border:none;border-radius:999px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit">Скопировать снова</button>
 <button id="grmclr" style="padding:12px 20px;background:transparent;color:var(--gdngr);border:1px solid var(--gbd);border-radius:999px;font-size:14px;cursor:pointer;font-family:inherit">Очистить логи</button>
 </div>`;
     ov.appendChild(m); document.body.appendChild(ov);
     const txt = m.querySelector('#grmt');
+    txt.value = report;
     m.querySelector('#grmc').onclick = () => ov.remove();
     m.querySelector('#grmc2').onclick = async () => {
         try {
@@ -306,12 +307,10 @@ font-size:15px;cursor:pointer;font-weight:600;font-family:inherit;transition:opa
 @keyframes gIn{from{opacity:0;transform:translateY(-6px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
 @keyframes gFd{from{opacity:0}to{opacity:1}}
 @keyframes gIt{from{opacity:0;transform:translateX(-4px)}to{opacity:1;transform:translateX(0)}}
-@keyframes gPls{0%,100%{opacity:1}50%{opacity:.5}}
 .grok-pnl{animation:gIn .25s var(--gease) both}
 .grok-mi{animation:gIt .3s var(--gease) both;transition:background .15s var(--gease),transform .1s var(--gease)}
 .grok-mi:hover{background:var(--ghov)!important}
-.grok-mi:active{transform:scale(.98)}
-.grok-cont{animation:gPls 1.6s ease-in-out infinite}`;
+.grok-mi:active{transform:scale(.98)}`;
     document.head.appendChild(s);
 }
 
@@ -451,9 +450,9 @@ function openSettings() {
 <button data-m="agentmail">AgentMail</button>
 <button data-m="simplelogin">SimpleLogin</button></div>
 <div id="amBlock">
-<label class="grok-lbl" id="amlbl">AgentMail API Key *</label>
+<label class="grok-lbl">AgentMail API Key *</label>
 <input id="amin" class="grok-in" type="password" placeholder="am_..." autocomplete="off">
-<p class="grok-hint" id="amhint">console.agentmail.to → API Keys.</p></div>
+<p class="grok-hint">console.agentmail.to → API Keys.</p></div>
 <div style="height:14px"></div>
 <div id="slBlock" style="display:none">
 <label class="grok-lbl">SimpleLogin API Key *</label>
@@ -488,9 +487,7 @@ GS.emailDone: ${GS.emailDone}
 GS.codeDone: ${GS.codeDone}
 GS.profileDone: ${GS.profileDone}
 GS.attempts: ${GS.attempts}
-GS.consecutiveNoCode: ${GS.consecutiveNoCode}
-inputs: ${document.querySelectorAll('input').length}
-buttons: ${document.querySelectorAll('button').length}</div>
+GS.consecutiveNoCode: ${GS.consecutiveNoCode}</div>
 </div>
 <div style="height:16px"></div>
 <div style="display:flex;flex-direction:column;gap:10px">
@@ -643,7 +640,7 @@ async function createAlias() {
     try { const d = JSON.parse(r.responseText); return d.alias || d.email; } catch { return null; }
 }
 
-// ═══════════════════ КОД ═══════════════════
+// ═══════════════════ ИЗВЛЕЧЕНИЕ КОДА ═══════════════════
 function extractCode(data) {
     if (!data) return null;
     const parts = [data.subject, data.extracted_text, data.extracted_html, data.text, data.html, data.body, data.preview].filter(Boolean);
@@ -708,7 +705,7 @@ async function findCodeFor(gs) {
 
 // ═══════════════════ GROK MODULE ═══════════════════
 const GR = {
-    _ourIds: ['grok-menu', 'gr', 'gset', 'ghlp', 'gc', 'gcp', 'gps'],
+    _ourIds: ['grok-menu', 'gr', 'gc', 'gcp', 'gps', 'gset', 'ghlp'],
 
     findMethodEmailBtn() {
         const btns = [...document.querySelectorAll('button, a[role="button"], div[role="button"]')];
@@ -752,7 +749,7 @@ const GR = {
         const btns = [...document.querySelectorAll('button[type="submit"]')];
         const filtered = btns.filter(b => {
             if (this._ourIds.includes(b.id)) return false;
-            if (b.closest('#grok-menu, #grok-status, .grok-pnl, #grok-report-modal')) return false;
+            if (b.closest('.grok-pnl, #grok-menu, #grok-status, #grok-report-modal')) return false;
             return b.offsetParent !== null;
         });
         let patterns;
@@ -769,7 +766,9 @@ const GR = {
             const b = filtered.find(b => b.textContent.trim().toLowerCase().includes(p));
             if (b) return b;
         }
-        return filtered[0] || null;
+        // Fallback только для 'email' — там обычно одна кнопка. Для 'code'/'profile' — null, чтобы не кликнуть не ту.
+        if (kind === 'email') return filtered[0] || null;
+        return null;
     },
     findResendBtn() {
         const btns = [...document.querySelectorAll('button, a[role="button"]')];
@@ -785,8 +784,7 @@ const GR = {
     hasTurnstile() {
         return !!document.querySelector('input[name="cf-turnstile-response"]') ||
                !!document.querySelector('div[data-sitekey]') ||
-               !!document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
-               !!document.querySelector('input[type="checkbox"]');
+               !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
     },
     turnstileSolved() {
         const inp = document.querySelector('input[name="cf-turnstile-response"]');
@@ -907,15 +905,10 @@ const GR = {
         if (!gi || !fi || !pi) { notify('[GR] Поля профиля не найдены', 'err'); return false; }
         notify('[GR] Заполняю профиль…', 'info', 4000);
 
-        await focusEl(gi); setVal(gi, ''); fireInput(gi, ''); await sleep(100);
         await typeHuman(gi, givenName);
         await delay(150, 300);
-
-        await focusEl(fi); setVal(fi, ''); fireInput(fi, ''); await sleep(100);
         await typeHuman(fi, familyName);
         await delay(150, 300);
-
-        await focusEl(pi); setVal(pi, ''); fireInput(pi, ''); await sleep(100);
         await typeHuman(pi, password);
         await delay(200, 500);
 
@@ -933,7 +926,6 @@ const GR = {
         if (this.hasTurnstile()) {
             if (!this.turnstileSolved()) {
                 notify('[GR] ⚠ Пройдите капчу Cloudflare Turnstile вручную', 'warn', 15000);
-                GS.turnstileWaitStart = Date.now();
                 for (let i = 0; i < 60; i++) {
                     await sleep(2000);
                     if (this.turnstileSolved()) { GS.turnstileSolved = true; notify('[GR] ✓ Капча пройдена', 'ok', 3000); break; }
@@ -982,18 +974,15 @@ const GR = {
         GS.running = true;
         try {
             if (stage === 'method') {
-                const ok1 = await this.submitMethod();
-                if (!ok1) { GS.running = false; return; }
+                if (!await this.submitMethod()) { GS.running = false; return; }
                 const email = await this.prepareEmail();
                 if (!email) { GS.running = false; return; }
-                const ok2 = await this.submitEmail(email);
-                if (!ok2) { GS.running = false; return; }
+                if (!await this.submitEmail(email)) { GS.running = false; return; }
                 await this.pollCode();
             } else if (stage === 'email' && !GS.emailDone) {
                 const email = await this.prepareEmail();
                 if (!email) { GS.running = false; return; }
-                const ok = await this.submitEmail(email);
-                if (!ok) { GS.running = false; return; }
+                if (!await this.submitEmail(email)) { GS.running = false; return; }
                 await this.pollCode();
             } else if (stage === 'code' && !GS.codeDone) {
                 if (GS.codeReqAt == null) GS.codeReqAt = (await load('gr_codeReqAt')) || Date.now();
@@ -1012,7 +1001,7 @@ const GR = {
             } else {
                 logAlways('GR', 'stage=' + stage + ' уже выполнен');
             }
-        } catch (e) { logAlways('GR', 'ERROR: ' + (e.message || e)); }
+        } catch (e) { logError('GR', e.message || e); }
         GS.running = false;
     },
     async prepareEmail() {
@@ -1071,7 +1060,6 @@ const GR = {
 
         for (let i = 0; i < C.maxTries; i++) {
             GS.attempts = i + 1;
-            if (GS.attempts <= 3 || GS.attempts % 5 === 0) setStatus('#GR' + GS.attempts);
             const r = await findCodeFor(GS);
             GS.lastReason = r.reason || null;
             if (r.found) {
@@ -1100,7 +1088,7 @@ const GR = {
                     } else { notify('[GR] Кнопка "Отправить повторно" не найдена', 'err', 6000); break; }
                 }
                 if (ok) {
-                    GS.polling = false; setStatus('');
+                    GS.polling = false;
                     await this.waitFor(() => this.hasProfileText(), 10000, 'profile-form');
                     if (this.hasProfileText() && !GS.profileDone) {
                         logAlways('GR', 'после кода → заполняю profile');
@@ -1122,13 +1110,13 @@ const GR = {
                 else GS.consecutiveNoCode = 0;
                 if (GS.consecutiveNoCode >= 10) {
                     notify('[GR] 10 попыток без валидного кода — стоп.', 'err', 15000);
-                    GS.polling = false; setStatus(''); return;
+                    GS.polling = false; return;
                 }
             }
             await sleep(C.interval);
         }
         notify('[GR] Код не найден за ' + C.maxTries + ' попыток', 'err', 12000);
-        GS.polling = false; setStatus('');
+        GS.polling = false;
     },
 };
 
@@ -1139,7 +1127,7 @@ function genPwd() {
     return p + s[~~(Math.random()*s.length)] + ~~(Math.random()*10);
 }
 
-// ═══════════════════ ДИАЛОГ ═══════════════════
+// ═══════════════════ ДИАЛОГ СТАРТА ═══════════════════
 function startDialog() {
     return new Promise(async res => {
         const ov = document.createElement('div');
@@ -1197,91 +1185,148 @@ function showHelp() {
     helpModal.onclick = e => { if (e.target === helpModal) { helpModal.remove(); helpModal = null; } };
 }
 
-// ═══════════════════ КОНТЕКСТ ═══════════════════
+// ═══════════════════ КОНТЕКСТ: КОПИРОВАТЬ ═══════════════════
 async function copyCtx() {
     const msgs = [];
-    for (const sel of ['[data-message-author-role]','[data-testid^="conversation-turn-"]','.message','div[class*="markdown"]']) {
+
+    // 1) Через атрибуты ролей (ChatGPT-стиль)
+    for (const sel of ['[data-message-author-role]','[data-message-role]','[data-role]','[data-author-role]']) {
         const els = document.querySelectorAll(sel);
         if (!els.length) continue;
         els.forEach(el => {
-            const role = el.getAttribute('data-message-author-role') ||
-                el.closest('[data-message-author-role]')?.getAttribute('data-message-author-role') || 'unknown';
-            const t = el.innerText.trim();
-            if (t.length > 5) msgs.push({ role, text: t });
+            let role = el.getAttribute('data-message-author-role')
+                    || el.getAttribute('data-message-role')
+                    || el.getAttribute('data-role')
+                    || el.getAttribute('data-author-role') || 'unknown';
+            role = role.toLowerCase();
+            if (/^(user|human|пользователь)$/.test(role)) role = 'user';
+            else if (/^(assistant|bot|grok|ai|ассистент)$/.test(role)) role = 'assistant';
+            const t = (el.innerText || '').trim();
+            if (t.length > 3) msgs.push({ role, text: t });
         });
-        break;
+        if (msgs.length) break;
     }
+
+    // 2) Grok-специфичные селекторы
+    if (!msgs.length) {
+        for (const sel of ['[class*="message-bubble"]','[class*="MessageBubble"]','[data-testid*="message"]','[data-testid*="Message"]']) {
+            const els = document.querySelectorAll(sel);
+            if (!els.length) continue;
+            els.forEach((el, idx) => {
+                let role = null;
+                for (const attr of ['data-role','data-message-role','data-author-role','data-testid']) {
+                    const v = el.getAttribute(attr);
+                    if (!v) continue;
+                    const vv = v.toLowerCase();
+                    if (/user|human/.test(vv)) { role = 'user'; break; }
+                    if (/assistant|bot|grok|response|ai/.test(vv)) { role = 'assistant'; break; }
+                }
+                if (!role) {
+                    const cls = (el.className || '').toString().toLowerCase();
+                    if (/user|human|from-user|outgoing|right/.test(cls)) role = 'user';
+                    else if (/assistant|bot|grok|response|incoming|left/.test(cls)) role = 'assistant';
+                }
+                if (!role) role = (idx % 2 === 0) ? 'user' : 'assistant';
+                const t = (el.innerText || '').trim();
+                if (t.length > 3) msgs.push({ role, text: t });
+            });
+            if (msgs.length) break;
+        }
+    }
+
+    // 3) Универсальный fallback по чётности
+    if (!msgs.length) {
+        let container = null;
+        for (const sel of ['main [class*="conversation"]','main [class*="chat"]','[role="log"]','main']) {
+            const c = document.querySelector(sel);
+            if (c && (c.innerText || '').length > 100) { container = c; break; }
+        }
+        if (container) {
+            const nodes = [...container.querySelectorAll('article, [class*="message"], [class*="turn"], div[role="group"]')];
+            nodes.forEach((el, idx) => {
+                const t = (el.innerText || '').trim();
+                if (t.length < 5 || t.length > 4000) return;
+                msgs.push({ role: idx % 2 === 0 ? 'user' : 'assistant', text: t });
+            });
+        }
+    }
+
     if (!msgs.length) return notify('Не найдено сообщений', 'err');
-    const text = msgs.map(m => `[${m.role === 'user' ? 'Пользователь' : m.role === 'assistant' ? 'Ассистент' : '?'}]: ${m.text}`).join('\n\n');
+
+    // Убираем дубликаты
+    const seen = new Set();
+    const uniq = [];
+    for (const m of msgs) {
+        const key = m.role + '|' + m.text.slice(0, 80);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        uniq.push(m);
+    }
+
+    const text = uniq.map(m => {
+        const label = m.role === 'user' ? 'Пользователь'
+                    : m.role === 'assistant' ? 'Grok' : '?';
+        return `[${label}]: ${m.text}`;
+    }).join('\n\n');
+
     ctx = text;
     await save('ctx', text);
     try {
         if (typeof GM_setClipboard !== 'undefined') GM_setClipboard(text, 'text');
         else await navigator.clipboard.writeText(text);
-        notify(`Скопировано (${msgs.length} сообщ., ${text.length} симв.)`, 'ok');
+        notify(`Скопировано (${uniq.length} сообщ., ${text.length} симв.)`, 'ok');
     } catch { notify('Ошибка копирования', 'err'); }
     closeMenu();
 }
+
+// ═══════════════════ КОНТЕКСТ: ВСТАВИТЬ ═══════════════════
 async function pasteCtx() {
     if (!ctx) ctx = await load('ctx');
     if (!ctx) return notify('Сначала скопируйте контекст', 'warn');
-    const inp = document.querySelector('textarea#prompt-textarea,textarea[placeholder*="Message"],textarea[placeholder*="Спросите"],textarea,div[contenteditable="true"]');
+    const inp = document.querySelector(
+        'textarea#prompt-textarea,textarea[placeholder*="Message"],textarea[placeholder*="Спросите"],' +
+        'div[contenteditable="true"],textarea,[contenteditable="true"]'
+    );
     if (!inp) return notify('Поле ввода не найдено', 'err');
-    if (inp.tagName === 'TEXTAREA' || inp.tagName === 'INPUT') await typeHuman(inp, ctx);
-    else if (inp.isContentEditable) { inp.focus(); inp.innerText = ctx; inp.dispatchEvent(new Event('input', { bubbles: true })); }
+
+    inp.focus();
+    await sleep(100);
+    if (inp.tagName === 'TEXTAREA' || inp.tagName === 'INPUT') {
+        setVal(inp, ctx);
+        fireInput(inp, ctx);
+        inp.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (inp.isContentEditable) {
+        // ProseMirror / tiptap — используем execCommand для надёжности
+        try {
+            document.execCommand('selectAll', false, null);
+            document.execCommand('insertText', false, ctx);
+        } catch {
+            inp.innerText = ctx;
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+    }
     notify(`Вставлено (${ctx.length} симв.)`, 'ok');
     closeMenu();
 }
 
 // ═══════════════════ МЕНЮ ═══════════════════
-let menuBtn = null, menuPnl = null, menuVis = false, statusLbl = null;
+let menuBtn = null, menuPnl = null, menuVis = false;
 
 const ICO_MENU = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>`;
 const ICO_COPY = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
 const ICO_PASTE = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>`;
 const ICO_REG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`;
-const ICO_CONT = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
 const ICO_SET = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
 const ICO_HELP = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
 
-function setStatus(t, c) {
-    if (!statusLbl) return;
-    statusLbl.textContent = t || '';
-    statusLbl.style.color = c || 'var(--gfg)';
+function closeMenu() {
+    if (menuPnl) { menuPnl.style.animation = 'none'; menuPnl.style.display = 'none'; }
+    menuVis = false;
 }
-
-// ОДИНАКОВАЯ позиция на ВСЕХ сайтах — слева, как было у ChatGPT
-function posMenu() {
-    if (!menuBtn) return;
-    const isMob = innerWidth < 768;
-    const left = isMob ? 52 : 56;
-    menuBtn.style.left = left + 'px';
-    menuBtn.style.right = 'auto';
-    menuBtn.style.top = '8px';
-    if (menuPnl) {
-        menuPnl.style.left = left + 'px';
-        menuPnl.style.right = 'auto';
-        menuPnl.style.top = '52px';
-    }
-    if (statusLbl) {
-        statusLbl.style.left = left + 'px';
-        statusLbl.style.right = 'auto';
-        statusLbl.style.top = '44px';
-    }
-}
-
-function setCanContinue(v) { canContinue = v; if (menuVis) updateMenu(); }
-function updateMenu() {
-    if (!menuPnl) return;
-    const cc = menuPnl.querySelector('#gc');
-    if (cc) cc.style.display = canContinue ? 'flex' : 'none';
-}
-function closeMenu() { if (menuPnl) { menuPnl.style.animation = 'none'; menuPnl.style.display = 'none'; } menuVis = false; }
 function toggleMenu() {
     if (!menuPnl) return;
     menuVis = !menuVis;
     if (menuVis) {
-        updateMenu();
         menuPnl.style.display = 'flex';
         menuPnl.style.animation = 'none';
         void menuPnl.offsetWidth;
@@ -1291,60 +1336,53 @@ function toggleMenu() {
 
 function createMenu() {
     if (menuBtn || !document.body) return;
+    // Одинаковый отступ, как было у ChatGPT
+    const left = innerWidth < 768 ? 52 : 56;
+
     menuBtn = document.createElement('button');
     menuBtn.id = 'grok-menu';
     menuBtn.title = 'Grok Auto Register';
     menuBtn.innerHTML = ICO_MENU;
-    menuBtn.style.cssText = `position:fixed;top:8px;left:56px;z-index:99999;width:36px;height:36px;padding:0;background:transparent;color:var(--gfg);border:none;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s var(--gease)`;
+    menuBtn.style.cssText = `position:fixed;top:8px;left:${left}px;z-index:99999;width:36px;height:36px;padding:0;background:transparent;color:var(--gfg);border:none;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s var(--gease)`;
     menuBtn.onmouseenter = () => menuBtn.style.background = 'var(--ghov)';
     menuBtn.onmouseleave = () => menuBtn.style.background = 'transparent';
     menuBtn.onclick = e => { e.stopPropagation(); toggleMenu(); };
 
-    statusLbl = document.createElement('div');
-    statusLbl.id = 'grok-status';
-    statusLbl.style.cssText = 'position:fixed;top:44px;left:56px;font-size:10px;font-weight:600;color:var(--gfg);text-align:center;width:36px;pointer-events:none';
-
     menuPnl = document.createElement('div');
     menuPnl.className = 'grok-gl grok-pnl';
-    menuPnl.style.cssText = 'position:fixed;top:52px;left:56px;z-index:99999;display:none;flex-direction:column;gap:4px;padding:8px;border-radius:var(--grad);min-width:230px;max-width:calc(100vw - 32px)';
+    menuPnl.style.cssText = `position:fixed;top:52px;left:${left}px;z-index:99999;display:none;flex-direction:column;gap:4px;padding:8px;border-radius:var(--grad);min-width:230px;max-width:calc(100vw - 32px)`;
 
-    const mkBtn = (id, ico, txt, fn, d = 0, cls = '') => {
+    const mkBtn = (id, ico, txt, fn, d = 0) => {
         const b = document.createElement('button');
         b.id = id;
-        b.className = 'grok-mi' + (cls ? ' ' + cls : '');
+        b.className = 'grok-mi';
         b.innerHTML = `<span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;margin-right:8px;opacity:.85">${ico}</span><span style="font-size:14px">${txt}</span>`;
         b.style.cssText = `display:flex;align-items:center;padding:10px 12px;background:transparent;color:var(--gfg);border:none;border-radius:10px;cursor:pointer;font-weight:500;text-align:left;animation-delay:${d}ms`;
         b.onclick = e => { e.stopPropagation(); fn(); };
         return b;
     };
 
-    // Кнопка «Регистрация Grok» — только на accounts.x.ai
     if (isAccounts()) {
         menuPnl.appendChild(mkBtn('gr', ICO_REG, 'Регистрация Grok', () => { closeMenu(); startReg(); }, 0));
-        menuPnl.appendChild(mkBtn('gc', ICO_CONT, 'Продолжить', () => { closeMenu(); setCanContinue(false); runStage(); }, 40, 'grok-cont'));
     }
-    menuPnl.appendChild(mkBtn('gcp', ICO_COPY, 'Копировать контекст', copyCtx, 80));
-    menuPnl.appendChild(mkBtn('gps', ICO_PASTE, 'Вставить контекст', pasteCtx, 120));
-    menuPnl.appendChild(mkBtn('gset', ICO_SET, 'Настройки', () => { closeMenu(); openSettings(); }, 160));
-    menuPnl.appendChild(mkBtn('ghlp', ICO_HELP, 'Помощь', () => { closeMenu(); showHelp(); }, 200));
+    menuPnl.appendChild(mkBtn('gcp', ICO_COPY, 'Копировать контекст', copyCtx, 40));
+    menuPnl.appendChild(mkBtn('gps', ICO_PASTE, 'Вставить контекст', pasteCtx, 80));
+    menuPnl.appendChild(mkBtn('gset', ICO_SET, 'Настройки', () => { closeMenu(); openSettings(); }, 120));
+    menuPnl.appendChild(mkBtn('ghlp', ICO_HELP, 'Помощь', () => { closeMenu(); showHelp(); }, 160));
 
     document.body.appendChild(menuBtn);
     document.body.appendChild(menuPnl);
-    document.body.appendChild(statusLbl);
 
-    posMenu();
-    addEventListener('resize', posMenu);
-    try { new MutationObserver(posMenu).observe(document.body, { childList: true, subtree: true }); } catch (e) {}
+    addEventListener('resize', () => {
+        const l = innerWidth < 768 ? 52 : 56;
+        menuBtn.style.left = l + 'px';
+        menuPnl.style.left = l + 'px';
+    });
 
     document.addEventListener('click', e => {
         if (menuPnl && menuPnl.style.display === 'flex' &&
             !menuPnl.contains(e.target) && !menuBtn.contains(e.target)) closeMenu();
     });
-}
-
-// ═══════════════════ ПРОДОЛЖИТЬ ═══════════════════
-function runStage() {
-    if (!GS.running) GR.run();
 }
 
 // ═══════════════════ СТАРТ ═══════════════════
@@ -1386,7 +1424,6 @@ async function init() {
     createMenu();
     await sleep(300);
 
-    // Автозапуск регистрации ТОЛЬКО на accounts.x.ai
     if (!isAccounts()) {
         logAlways('init', 'не accounts.x.ai — только меню');
         return;
