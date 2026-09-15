@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT + Grok Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      82.0
+// @version      82.1
 // @description  Авторегистрация ChatGPT и Grok через AgentMail.to / SimpleLogin + вкладки настроек + диагностика
 // @author       You
 // @match        https://chatgpt.com/*
@@ -103,7 +103,7 @@ async function buildReport() {
     const p = [];
     p.push('═══ AUTO REGISTER — ОТЧЁТ (ChatGPT + Grok) ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия скрипта: 82.0');
+    p.push('Версия скрипта: 82.1');
     p.push('URL: ' + location.href);
     p.push('Host: ' + location.hostname);
     p.push('Path: ' + location.pathname);
@@ -113,7 +113,7 @@ async function buildReport() {
     p.push('Окно: ' + innerWidth + '×' + innerHeight);
     p.push('');
 
-    // --- ChatGPT-состояние (сохраняем без изменений) ---
+    // --- ChatGPT-состояние ---
     p.push('─── СОСТОЯНИЕ CHATGPT ───');
     p.push('running: ' + running);
     p.push('regDone: ' + regDone);
@@ -194,6 +194,7 @@ async function buildReport() {
     p.push('hasLoginBtn: ' + hasLoginBtn());
     p.push('loggedIn: ' + loggedIn());
     p.push('menuBtn.left: ' + (menuBtn ? menuBtn.style.left : 'нет'));
+    p.push('menuBtn.right: ' + (menuBtn ? menuBtn.style.right : 'нет'));
     p.push('account: ' + currentAccountId());
     p.push('');
 
@@ -607,8 +608,8 @@ async function ensureKeys() {
         C.slKey = (await load('slKey')) || '';
         C.slRelay = (await load('slRelay')) || '';
         C.mode = (await load('mode')) || 'agentmail';
-        C.grokEnabled = (await load('grokEnabled'));
-        if (C.grokEnabled === null) C.grokEnabled = true;
+        const ge = await load('grokEnabled');
+        if (ge !== null) C.grokEnabled = ge;
         return true;
     }
     return !!(await openSettings());
@@ -957,16 +958,6 @@ const GR = {
         return 'unknown';
     },
 
-    // --- Прокрутка ---
-    async scroll() {
-        for (let i = 0; i < 8; i++) {
-            window.scrollTo({ top: i * 400, behavior: 'smooth' });
-            await sleep(200);
-        }
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-        await sleep(300);
-    },
-
     // --- Действия ---
     async submitEmail(email) {
         const inp = this.findEmail();
@@ -1080,12 +1071,10 @@ const GR = {
     },
 
     async prepareEmail() {
-        // Если уже есть inbox — используем
         if (GS.inbox?.email) {
             notify('[GR] Использую почту: ' + GS.inbox.email, 'info', 4000);
             return GS.inbox.email;
         }
-        // Создаём/получаем
         setStatus('Почта GR…');
         let email;
         if (C.mode === 'simplelogin') {
@@ -1248,12 +1237,11 @@ function showHelp() {
 <ol style="margin:0;padding-left:20px;color:var(--gmut);font-size:13px;line-height:1.7">
 <li>Откройте <b style="color:var(--gfg)">accounts.x.ai/sign-up</b>.</li>
 <li>Убедитесь, что Grok включён в настройках скрипта.</li>
-<li>Нажмите <b style="color:var(--gfg)">☰ → Регистрация</b> (или скрипт запустится автоматически при загрузке).</li>
+<li>Нажмите <b style="color:var(--gfg)">☰ → Регистрация Grok</b> (кнопка справа сверху).</li>
 <li>На первом шаге скрипт создаст почту и введёт email.</li>
 <li>На втором шаге дождётся письма и введёт 6-значный код.</li>
 <li>На третьем шаге заполнит имя, фамилию и пароль.</li>
 <li><b style="color:var(--gdngr)">⚠ Пройдите капчу Cloudflare Turnstile вручную</b> — скрипт не может решить её автоматически. Он будет ждать до 2 минут.</li>
-<li>Нажмите «Завершить регистрацию» (или скрипт нажмёт сам после капчи).</li>
 </ol>
 </div>
 <div style="margin-bottom:22px">
@@ -1264,7 +1252,6 @@ function showHelp() {
 <li><b style="color:var(--gfg)">Подробный лог</b> — расширенное логирование HTTP, шагов, извлечения кода и заполнения полей.</li>
 <li><b style="color:var(--gfg)">Скопировать отчёт</b> — собирает в один текст: версию, URL, состояние ChatGPT и Grok, конфиг, DOM-проверки, ошибки и последние 200 строк лога.</li>
 </ul>
-<p style="margin:0;color:var(--gmut);font-size:12px">В отчёте отдельно идут блоки <b>CHATGPT</b> и <b>GROK</b>, чтобы было видно, что именно пошло не так.</p>
 </div>
 <div style="margin-bottom:22px">
 <h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">⚠️ Лимиты</h3>
@@ -1302,14 +1289,44 @@ function posMenu() {
     if (!menuBtn) return;
     const isMob = innerWidth < 768;
     const host = location.hostname;
-    const left = host.includes('auth.openai.com') ? (isMob ? 8 : 12)
-              : host.includes('accounts.x.ai') ? (isMob ? 8 : 12)
-              : (isMob ? 52 : 56);
-    if (menuBtn.style.left === left + 'px') return;
-    menuBtn.style.left = left + 'px';
-    if (menuPnl) menuPnl.style.left = left + 'px';
-    if (statusLbl) statusLbl.style.left = left + 'px';
-    log('DEBUG', 'posMenu', 'left=' + left + ' host=' + host);
+    const isAuthGrok = host.includes('accounts.x.ai');
+    const isAuthOA = host.includes('auth.openai.com');
+
+    // На Grok и auth.openai.com — правый верхний угол.
+    // На chatgpt.com — слева от логотипа, как было.
+    if (isAuthGrok || isAuthOA) {
+        const right = isMob ? 8 : 12;
+        const top = isMob ? 8 : 8;
+        menuBtn.style.left = 'auto';
+        menuBtn.style.right = right + 'px';
+        menuBtn.style.top = top + 'px';
+        if (menuPnl) {
+            menuPnl.style.left = 'auto';
+            menuPnl.style.right = right + 'px';
+            menuPnl.style.top = (top + 44) + 'px';
+        }
+        if (statusLbl) {
+            statusLbl.style.left = 'auto';
+            statusLbl.style.right = right + 'px';
+            statusLbl.style.top = (top + 40) + 'px';
+            statusLbl.style.width = '36px';
+        }
+    } else {
+        const left = isMob ? 52 : 56;
+        menuBtn.style.right = 'auto';
+        menuBtn.style.left = left + 'px';
+        menuBtn.style.top = '8px';
+        if (menuPnl) {
+            menuPnl.style.right = 'auto';
+            menuPnl.style.left = left + 'px';
+            menuPnl.style.top = '52px';
+        }
+        if (statusLbl) {
+            statusLbl.style.right = 'auto';
+            statusLbl.style.left = left + 'px';
+            statusLbl.style.top = '44px';
+        }
+    }
 }
 
 function setCanContinue(v) { canContinue = v; if (menuVis) updateMenu(); }
@@ -1412,7 +1429,12 @@ function createMenu() {
 
     posMenu();
     addEventListener('resize', posMenu);
-    setInterval(posMenu, 3000);
+
+    // Пересчёт позиции при изменениях DOM (без постоянного таймера — нет мерцания)
+    try {
+        const obs = new MutationObserver(() => posMenu());
+        obs.observe(document.body, { childList: true, subtree: true });
+    } catch (e) { log('WARN', 'menu', 'MutationObserver fail: ' + e.message); }
 
     document.addEventListener('click', e => {
         if (menuPnl && menuPnl.style.display === 'flex' &&
@@ -1702,7 +1724,9 @@ async function startReg() {
         GS.turnstileSolved = false; GS.detectedStage = null;
         await save('gr_codeDone', false);
         await save('gr_profileDone', false);
-        await ensureKeys();
+        // Ключи проверяем ТОЛЬКО здесь, при нажатии «Регистрация»
+        const ok = await ensureKeys();
+        if (!ok) { notify('Ключи не заданы', 'warn', 5000); return; }
         await GR.run();
         return;
     }
@@ -1711,7 +1735,8 @@ async function startReg() {
     loginTried = false; verifyDone = false; pwdDone = false;
     canContinue = false; profileNotified = false;
     log('INFO', 'startReg', 'ChatGPT registration');
-    await ensureKeys();
+    const ok = await ensureKeys();
+    if (!ok) { notify('Ключи не заданы', 'warn', 5000); return; }
     running = true;
     runStage();
 }
@@ -1722,26 +1747,39 @@ async function init() {
     inited = true;
     log('INFO', 'init', 'start. host=' + location.hostname + ' path=' + location.pathname);
     injectCSS();
-    await ensureKeys();
-    await sleep(500);
+
+    // ВАЖНО: НЕ ждём ключи здесь. Иначе меню не появится, пока не закроешь настройки.
+    // Ключи проверяются внутри startReg() при нажатии «Регистрация».
+    const dbg = await load('debug');
+    if (dbg === true) C.debug = true;
+    const ge = await load('grokEnabled');
+    if (ge === false) C.grokEnabled = false;
+
     createMenu();
+    updateMenu();
+
+    await sleep(300);
 
     if (isGrok()) {
-        // Grok: пробуем продолжить с сохранённого состояния
         const codeDoneSaved = await load('gr_codeDone');
         const profileDoneSaved = await load('gr_profileDone');
         if (codeDoneSaved) GS.codeDone = true;
         if (profileDoneSaved) GS.profileDone = true;
-        // Автозапуск только если мы на странице регистрации и есть незавершённый этап
+
         const stage = GR.detectStage();
         if (C.grokEnabled && stage !== 'unknown' && !GS.regDone) {
-            log('INFO', 'init', 'Grok auto-run on stage=' + stage);
-            setTimeout(() => GR.run(), 1500);
+            // Автозапуск только при явных признаках середины регистрации,
+            // а не на самом первом шаге, чтобы не открывать настройки сами.
+            if (stage === 'code' || stage === 'profile') {
+                log('INFO', 'init', 'Grok auto-run on stage=' + stage);
+                setTimeout(() => GR.run(), 1500);
+            } else {
+                log('INFO', 'init', 'Grok stage=' + stage + ' — ждём нажатия «Регистрация Grok»');
+            }
         }
         return;
     }
 
-    // ChatGPT
     if (!loggedIn() && !onLogin() && !regDone && !running) {
         log('INFO', 'init', 'ChatGPT auto-run');
         setTimeout(() => { if (!running) { running = true; runStage(); } }, 1000);
