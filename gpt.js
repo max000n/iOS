@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT + Grok Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      82.3
+// @version      82.4
 // @description  Авторегистрация ChatGPT и Grok через AgentMail.to / SimpleLogin
 // @author       You
 // @match        https://chatgpt.com/*
@@ -23,6 +23,8 @@ const C = {
     amKey: '', amBase: 'https://api.agentmail.to/v0',
     slKey: '', slBase: 'https://app.simplelogin.io',
     slRelay: '',
+    slDomain: '',         // напр. "simplelogin.co", "sl.mydomain.com"
+    slPrefix: '',         // префикс алиаса (необязательно)
     mode: 'agentmail',
     interval: 3000, maxTries: 120, tolMs: 60000,
     fast: true, delInbox: true, retries: 3, shift: true,
@@ -38,13 +40,14 @@ let codeDone = false, profileDone = false, regDone = false,
     notifyDone = false, canContinue = false, profileNotified = false;
 
 const GS = {
-    emailDone: false, codeDone: false, profileDone: false, regDone: false,
-    methodDone: false,
+    methodDone: false, emailDone: false, codeDone: false, profileDone: false, regDone: false,
     running: false, polling: false,
     inbox: null, codeReqAt: null, usedIds: new Set(),
     attempts: 0, lastReason: null, lastCode: null,
     turnstileSolved: false, turnstileWaitStart: 0,
     detectedStage: null,
+    consecutiveNoCode: 0,
+    lastError: null,
 };
 
 const verifyStats = {
@@ -90,110 +93,28 @@ function log(level, tag, ...args) {
     console.log(line);
 }
 
-addEventListener('error', e => {
-    log('ERROR', 'window', e.message + ' at ' + e.filename + ':' + e.lineno + ':' + e.colno);
-});
-addEventListener('unhandledrejection', e => {
-    log('ERROR', 'promise', e.reason?.message || String(e.reason));
-});
-
-function dumpGrokDOM() {
-    const out = [];
-    const push = (label, val) => out.push(label + ': ' + val);
-
-    push('--- GROK DOM DUMP ---', '');
-    push('URL', location.href);
-    push('readyState', document.readyState);
-    push('body.childElementCount', document.body ? document.body.childElementCount : 'no body');
-    push('html.lang', document.documentElement.lang);
-
-    const inputs = [...document.querySelectorAll('input')];
-    push('inputs.total', inputs.length);
-    inputs.slice(0, 30).forEach((el, i) => {
-        const r = el.getBoundingClientRect();
-        const vis = el.offsetParent !== null || (r.width > 0 && r.height > 0);
-        push(`input[${i}]`, JSON.stringify({
-            id: el.id, name: el.name, type: el.type,
-            maxlength: el.getAttribute('maxlength'),
-            autocomplete: el.getAttribute('autocomplete'),
-            placeholder: el.placeholder,
-            inputmode: el.getAttribute('inputmode'),
-            ariaLabel: el.getAttribute('aria-label'),
-            visible: vis, value: (el.value || '').slice(0, 20),
-            rect: { w: Math.round(r.width), h: Math.round(r.height) }
-        }));
-    });
-
-    const btns = [...document.querySelectorAll('button, a[role="button"], div[role="button"], input[type="submit"]')];
-    push('buttons.total', btns.length);
-    btns.slice(0, 40).forEach((el, i) => {
-        const r = el.getBoundingClientRect();
-        const vis = el.offsetParent !== null || (r.width > 0 && r.height > 0);
-        push(`button[${i}]`, JSON.stringify({
-            tag: el.tagName, type: el.type || null,
-            text: (el.textContent || '').trim().slice(0, 60),
-            ariaLabel: el.getAttribute('aria-label'),
-            dataTestId: el.getAttribute('data-testid'),
-            visible: vis,
-            rect: { w: Math.round(r.width), h: Math.round(r.height) }
-        }));
-    });
-
-    const forms = [...document.querySelectorAll('form')];
-    push('forms.total', forms.length);
-
-    const iframes = [...document.querySelectorAll('iframe')];
-    push('iframes.total', iframes.length);
-    iframes.slice(0, 10).forEach((el, i) => {
-        push(`iframe[${i}]`, JSON.stringify({
-            src: (el.src || '').slice(0, 120),
-            id: el.id, name: el.name,
-            visible: el.offsetParent !== null
-        }));
-    });
-
-    push('turnstile.response input', !!document.querySelector('input[name="cf-turnstile-response"]'));
-    push('turnstile.div[data-sitekey]', !!document.querySelector('div[data-sitekey]'));
-    push('turnstile.iframe', !!document.querySelector('iframe[src*="challenges.cloudflare.com"]'));
-
-    const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 600);
-    push('body.innerText (600)', bodyText);
-
-    [...document.querySelectorAll('h1, h2')].slice(0, 5).forEach((el, i) => {
-        push(`heading[${i}]`, (el.textContent || '').trim().slice(0, 100));
-    });
-
-    push('--- END DUMP ---', '');
-    return out.join('\n');
-}
+addEventListener('error', e => log('ERROR', 'window', e.message + ' at ' + e.filename + ':' + e.lineno));
+addEventListener('unhandledrejection', e => log('ERROR', 'promise', e.reason?.message || String(e.reason)));
 
 async function buildReport() {
     const p = [];
-    p.push('═══ AUTO REGISTER — ОТЧЁТ (ChatGPT + Grok) ═══');
+    p.push('═══ AUTO REGISTER — ОТЧЁТ ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия скрипта: 82.3');
+    p.push('Версия: 82.4');
     p.push('URL: ' + location.href);
-    p.push('Host: ' + location.hostname);
-    p.push('Path: ' + location.pathname);
-    p.push('Сайт: ' + (isGrok() ? 'Grok (accounts.x.ai)' : 'ChatGPT'));
+    p.push('Сайт: ' + (isGrok() ? 'Grok' : 'ChatGPT'));
     p.push('readyState: ' + document.readyState);
-    p.push('User Agent: ' + navigator.userAgent);
     p.push('Окно: ' + innerWidth + '×' + innerHeight);
     p.push('');
 
-    p.push('─── СОСТОЯНИЕ CHATGPT ───');
+    p.push('─── CHATGPT ───');
     p.push('running: ' + running);
-    p.push('regDone: ' + regDone);
-    p.push('verifyDone: ' + verifyDone);
     p.push('codeDone: ' + codeDone);
-    p.push('pwdDone: ' + pwdDone);
-    p.push('profileDone: ' + profileDone);
     p.push('polling: ' + polling);
-    p.push('loginTried: ' + loginTried);
     p.push('inbox: ' + JSON.stringify(inbox));
     p.push('');
 
-    p.push('─── СОСТОЯНИЕ GROK ───');
+    p.push('─── GROK ───');
     p.push('grokEnabled: ' + C.grokEnabled);
     p.push('GS.methodDone: ' + GS.methodDone);
     p.push('GS.emailDone: ' + GS.emailDone);
@@ -203,8 +124,10 @@ async function buildReport() {
     p.push('GS.running: ' + GS.running);
     p.push('GS.polling: ' + GS.polling);
     p.push('GS.attempts: ' + GS.attempts);
+    p.push('GS.consecutiveNoCode: ' + GS.consecutiveNoCode);
     p.push('GS.lastReason: ' + GS.lastReason);
     p.push('GS.lastCode: ' + GS.lastCode);
+    p.push('GS.lastError: ' + GS.lastError);
     p.push('GS.detectedStage: ' + GS.detectedStage);
     p.push('GS.turnstileSolved: ' + GS.turnstileSolved);
     p.push('GS.inbox: ' + JSON.stringify(GS.inbox));
@@ -213,14 +136,13 @@ async function buildReport() {
     p.push('─── КОНФИГ ───');
     p.push('mode: ' + C.mode);
     p.push('slRelay: ' + (C.slRelay || 'не задан'));
-    p.push('debug: ' + C.debug);
-    p.push('amKey: ' + (C.amKey ? C.amKey.slice(0, 8) + '…(' + C.amKey.length + ')' : 'нет'));
-    p.push('slKey: ' + (C.slKey ? C.slKey.slice(0, 8) + '…(' + C.slKey.length + ')' : 'нет'));
+    p.push('slDomain: ' + (C.slDomain || 'не задан'));
+    p.push('slPrefix: ' + (C.slPrefix || 'не задан'));
+    p.push('amKey: ' + (C.amKey ? C.amKey.slice(0, 8) + '…' : 'нет'));
+    p.push('slKey: ' + (C.slKey ? C.slKey.slice(0, 8) + '…' : 'нет'));
     p.push('');
-
     p.push('detect(): ' + detect());
-    p.push('menuBtn.left: ' + (menuBtn ? menuBtn.style.left : 'нет'));
-    p.push('menuBtn.right: ' + (menuBtn ? menuBtn.style.right : 'нет'));
+    p.push('menuBtn.left: ' + (menuBtn ? menuBtn.style.left : '—'));
     p.push('');
 
     if (isGrok()) {
@@ -229,21 +151,10 @@ async function buildReport() {
         p.push('GR.findMethodEmailBtn(): ' + (GR.findMethodEmailBtn() ? 'есть' : 'нет'));
         p.push('GR.findEmail(): ' + (GR.findEmail() ? 'есть' : 'нет'));
         p.push('GR.findCode(): ' + (GR.findCode() ? 'есть' : 'нет'));
-        p.push('GR.findGivenName(): ' + (GR.findGivenName() ? 'есть' : 'нет'));
-        p.push('GR.findFamilyName(): ' + (GR.findFamilyName() ? 'есть' : 'нет'));
-        p.push('GR.findPwd(): ' + (GR.findPwd() ? 'есть' : 'нет'));
+        p.push('GR.hasCodeError(): ' + GR.hasCodeError());
+        p.push('GR.findResendBtn(): ' + (GR.findResendBtn() ? 'есть' : 'нет'));
         p.push('GR.findSubmit(): ' + (GR.findSubmit() ? 'есть' : 'нет'));
-        p.push('GR.hasTurnstile(): ' + GR.hasTurnstile());
         p.push('GR.detectStage(): ' + GR.detectStage());
-        p.push('');
-        p.push(dumpGrokDOM());
-        p.push('');
-    } else {
-        p.push('─── DOM (ChatGPT) ───');
-        p.push('findEmail(): ' + (findEmail() ? 'есть' : 'нет'));
-        p.push('findPwd(): ' + (findPwd() ? 'есть' : 'нет'));
-        p.push('findCodes(): ' + (findCodes() ? 'есть' : 'нет'));
-        p.push('loggedIn(): ' + loggedIn());
         p.push('');
     }
 
@@ -254,8 +165,7 @@ async function buildReport() {
     p.push('─── ЛОГ (' + logBuf.length + ') ───');
     if (!logBuf.length) p.push('(пусто)');
     else logBuf.slice(-300).forEach(l => p.push(l));
-    p.push('');
-    p.push('═══ КОНЕЦ ОТЧЁТА ═══');
+    p.push('═══ КОНЕЦ ═══');
     return p.join('\n');
 }
 
@@ -281,25 +191,23 @@ function showReportModal(report, copied) {
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
 <h2 style="margin:0;font-size:17px;font-weight:600">Отчёт диагностики</h2>
 <button id="grmc" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--gmut);padding:0 5px">×</button></div>
-<p style="margin:0 0 10px 0;font-size:12px;color:var(--gmut)">${copied ? '✓ Скопировано в буфер.' : '⚠ Буфер недоступен.'} Размер: ${report.length} симв.</p>
-<textarea id="grmt" readonly style="flex:1;min-height:480px;width:100%;padding:12px;border-radius:10px;border:1px solid var(--gbd);background:var(--gelev);color:var(--gfg);font-family:ui-monospace,monospace;font-size:11px;line-height:1.4;resize:vertical;box-sizing:border-box">${report.replace(/</g, '<')}</textarea>
+<p style="margin:0 0 10px 0;font-size:12px;color:var(--gmut)">${copied ? '✓ Скопировано.' : '⚠ Буфер недоступен.'} Размер: ${report.length}</p>
+<textarea id="grmt" readonly style="flex:1;min-height:480px;width:100%;padding:12px;border-radius:10px;border:1px solid var(--gbd);background:var(--gelev);color:var(--gfg);font-family:ui-monospace,monospace;font-size:11px;resize:vertical;box-sizing:border-box">${report.replace(/</g, '<')}</textarea>
 <div style="display:flex;gap:10px;margin-top:12px">
 <button id="grmc2" style="flex:1;padding:12px;background:var(--gacc);color:var(--gaccf);border:none;border-radius:999px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit">Скопировать снова</button>
 <button id="grmclr" style="padding:12px 20px;background:transparent;color:var(--gdngr);border:1px solid var(--gbd);border-radius:999px;font-size:14px;cursor:pointer;font-family:inherit">Очистить логи</button>
 </div>`;
     ov.appendChild(m);
     document.body.appendChild(ov);
-
     const txt = m.querySelector('#grmt');
-    const copyAgain = async () => {
+    m.querySelector('#grmc').onclick = () => ov.remove();
+    m.querySelector('#grmc2').onclick = async () => {
         try {
             if (typeof GM_setClipboard !== 'undefined') GM_setClipboard(report, 'text');
             else { txt.focus(); txt.select(); document.execCommand('copy'); }
             notify('Скопировано', 'ok', 2000);
         } catch { notify('Не удалось', 'err', 3000); }
     };
-    m.querySelector('#grmc').onclick = () => ov.remove();
-    m.querySelector('#grmc2').onclick = copyAgain;
     m.querySelector('#grmclr').onclick = async () => {
         logBuf.length = 0; diagErrors.length = 0;
         await GM.setValue('cg_logs', []).catch(() => {});
@@ -364,7 +272,7 @@ function fireInput(el, v) {
     catch { el.dispatchEvent(new Event('input', { bubbles: true })); }
 }
 async function click(el) {
-    if (!el) { log('DEBUG', 'click', 'null'); return false; }
+    if (!el) return false;
     log('DEBUG', 'click', (el.tagName || '?') + ' "' + (el.textContent || '').trim().slice(0, 40) + '"');
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     await delay(50, 150);
@@ -464,7 +372,7 @@ function openSettings() {
         settingsModal.style.cssText = 'position:fixed;inset:0;background:var(--govl);z-index:999999;display:flex;align-items:center;justify-content:center;animation:gFd .2s var(--gease) both';
         const d = document.createElement('div');
         d.className = 'gpt-gl';
-        d.style.cssText = 'padding:24px;border-radius:20px;max-width:520px;width:92%;max-height:90vh;display:flex;flex-direction:column;color:var(--gfg);animation:gIn .3s var(--gease) both';
+        d.style.cssText = 'padding:24px;border-radius:20px;max-width:560px;width:92%;max-height:92vh;display:flex;flex-direction:column;color:var(--gfg);animation:gIn .3s var(--gease) both';
         d.innerHTML = `
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
 <h2 style="margin:0;font-size:18px;font-weight:600">Настройки</h2>
@@ -475,7 +383,7 @@ function openSettings() {
 <button data-t="diag">Диагностика</button>
 </div>
 
-<div id="pane-general" style="overflow-y:auto;max-height:60vh;padding-right:4px">
+<div id="pane-general" style="overflow-y:auto;max-height:65vh;padding-right:4px">
 <p style="color:var(--gmut);font-size:12px;margin:0 0 16px 0">Ключи сохраняются в Tampermonkey.</p>
 <label class="gpt-lbl">Режим</label>
 <div class="gpt-seg" id="gm" style="margin-bottom:18px">
@@ -484,16 +392,24 @@ function openSettings() {
 <div id="amBlock">
 <label class="gpt-lbl" id="amlbl">AgentMail API Key <span style="color:var(--gmut)">*</span></label>
 <input id="amin" class="gpt-in" type="password" placeholder="am_..." autocomplete="off">
-<p class="gpt-hint" id="amhint">console.agentmail.to → API Keys</p></div>
+<p class="gpt-hint" id="amhint">console.agentmail.to → API Keys. Скрипт создаёт новый inbox при каждом запуске.</p></div>
 <div style="height:14px"></div>
 <div id="slBlock" style="display:none">
 <label class="gpt-lbl">SimpleLogin API Key <span style="color:var(--gmut)">*</span></label>
 <input id="slin" class="gpt-in" type="password" placeholder="sl_..." autocomplete="off">
 <p class="gpt-hint">app.simplelogin.io/dashboard/api_key</p>
 <div style="height:12px"></div>
-<label class="gpt-lbl">AgentMail email для проверки <span style="color:var(--gmut)">*</span></label>
+<label class="gpt-lbl">AgentMail email для проверки (relay) <span style="color:var(--gmut)">*</span></label>
 <input id="slemail" class="gpt-in" type="email" placeholder="relay@agentmail.to" autocomplete="off">
-<p class="gpt-hint">Адрес постоянного inbox, привязанного в SimpleLogin → Mailboxes.</p></div>
+<p class="gpt-hint">Постоянный ящик AgentMail, привязанный в SimpleLogin → Mailboxes.</p>
+<div style="height:12px"></div>
+<label class="gpt-lbl">Домен SimpleLogin (опционально)</label>
+<input id="sldomain" class="gpt-in" type="text" placeholder="simplelogin.co" autocomplete="off">
+<p class="gpt-hint">Если xAI блокирует дефолтный домен — укажите свой домен, привязанный к SimpleLogin (например sl.mysite.com). Оставьте пустым для дефолтного.</p>
+<div style="height:12px"></div>
+<label class="gpt-lbl">Префикс алиаса (опционально)</label>
+<input id="slprefix" class="gpt-in" type="text" placeholder="оставьте пустым" autocomplete="off">
+<p class="gpt-hint">Например "grok-" даст алиасы вида grok-xxxx@sl.mysite.com</p></div>
 <div style="height:14px"></div>
 <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:var(--gelev);border-radius:12px">
 <span style="font-size:13px;color:var(--gfg)">Включить Grok (accounts.x.ai)</span>
@@ -501,30 +417,14 @@ function openSettings() {
 <span style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s var(--gease);box-shadow:0 1px 3px rgba(0,0,0,.3);transform:translateX(${C.grokEnabled ? '16px' : '0'})"></span></span></div>
 </div>
 
-<div id="pane-diag" style="display:none;overflow-y:auto;max-height:60vh;padding-right:4px">
+<div id="pane-diag" style="display:none;overflow-y:auto;max-height:65vh;padding-right:4px">
 <label class="gpt-lbl">Диагностика</label>
 <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:var(--gelev);border-radius:12px;margin-bottom:12px">
 <span style="font-size:13px;color:var(--gfg)">Подробный лог</span>
 <span id="gsw" style="position:relative;width:38px;height:22px;background:${C.debug ? 'var(--gfg)' : '#8e8e8e'};border-radius:999px;flex-shrink:0;cursor:pointer;transition:background .2s var(--gease)">
 <span style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s var(--gease);box-shadow:0 1px 3px rgba(0,0,0,.3);transform:translateX(${C.debug ? '16px' : '0'})"></span></span></div>
 <button id="grepBtn" style="width:100%;padding:12px;background:var(--gelev);color:var(--gfg);border:1px solid var(--gbd);border-radius:999px;font-size:13px;cursor:pointer;font-family:inherit;margin-bottom:12px">Скопировать отчёт</button>
-<button id="gdumpBtn" style="width:100%;padding:12px;background:var(--gelev);color:var(--gfg);border:1px solid var(--gbd);border-radius:999px;font-size:13px;cursor:pointer;font-family:inherit;margin-bottom:12px">Дамп Grok DOM в консоль</button>
-<p style="color:var(--gmut);font-size:12px;margin:0 0 8px 0">Live-состояние:</p>
-<div style="background:var(--gelev);padding:10px 12px;border-radius:10px;font-family:ui-monospace,monospace;font-size:11px;color:var(--gmut);line-height:1.6;white-space:pre-wrap">сайт: ${isGrok() ? 'Grok' : 'ChatGPT'}
-stage: ${detect()}
-
-— Grok —
-GS.methodDone: ${GS.methodDone}
-GS.emailDone: ${GS.emailDone}
-GS.codeDone: ${GS.codeDone}
-GS.profileDone: ${GS.profileDone}
-GS.regDone: ${GS.regDone}
-GS.attempts: ${GS.attempts}
-GS.lastReason: ${GS.lastReason || '—'}
-GS.detectedStage: ${GS.detectedStage}
-inputs: ${document.querySelectorAll('input').length}
-buttons: ${document.querySelectorAll('button').length}</div>
-<p style="color:var(--gmut);font-size:11px;margin:12px 0 0 0">Логи также видны в консоли браузера.</p>
+<p style="color:var(--gmut);font-size:11px;margin:0">Логи также видны в консоли браузера.</p>
 </div>
 
 <div style="height:16px"></div>
@@ -545,12 +445,14 @@ buttons: ${document.querySelectorAll('button').length}</div>
         });
 
         const am = d.querySelector('#amin'), sl = d.querySelector('#slin'),
-              sle = d.querySelector('#slemail'),
-              amL = d.querySelector('#amlbl'), amH = d.querySelector('#amhint'),
-              slB = d.querySelector('#slBlock');
+              sle = d.querySelector('#slemail'), sld = d.querySelector('#sldomain'),
+              slp = d.querySelector('#slprefix'),
+              amL = d.querySelector('#amlbl'), slB = d.querySelector('#slBlock');
         if (C.amKey) am.value = C.amKey;
         if (C.slKey) sl.value = C.slKey;
         if (C.slRelay) sle.value = C.slRelay;
+        if (C.slDomain) sld.value = C.slDomain;
+        if (C.slPrefix) slp.value = C.slPrefix;
 
         let mode = C.mode;
         const seg = d.querySelector('#gm'), btns = seg.querySelectorAll('button');
@@ -590,34 +492,32 @@ buttons: ${document.querySelectorAll('button').length}</div>
         d.querySelector('#gcancel').onclick = () => close(null);
         settingsModal.onclick = e => { if (e.target === settingsModal) close(null); };
         d.querySelector('#gsave').onclick = async () => {
-            const ak = am.value.trim(), sk = sl.value.trim(), relay = sle.value.trim();
+            const ak = am.value.trim(), sk = sl.value.trim(),
+                  relay = sle.value.trim(), domain = sld.value.trim(), prefix = slp.value.trim();
             if (!ak) return notify('Укажите AgentMail API Key', 'err', 4000);
             if (mode === 'simplelogin' && !sk) return notify('Для SimpleLogin укажите API Key', 'err', 5000);
             if (mode === 'simplelogin' && !relay) return notify('Укажите AgentMail email для SimpleLogin', 'err', 5000);
             await save('amKey', ak);
             await save('slKey', sk || null);
             await save('slRelay', relay || null);
+            await save('slDomain', domain || null);
+            await save('slPrefix', prefix || null);
             await save('mode', mode);
-            C.amKey = ak; C.slKey = sk; C.slRelay = relay; C.mode = mode;
+            C.amKey = ak; C.slKey = sk; C.slRelay = relay; C.slDomain = domain; C.slPrefix = prefix; C.mode = mode;
             notify('Настройки сохранены', 'ok', 3000);
             close(true);
         };
         d.querySelector('#gclr').onclick = async () => {
-            await save('amKey', null); await save('slKey', null); await save('slRelay', null); await save('mode', null);
-            C.amKey = ''; C.slKey = ''; C.slRelay = ''; C.mode = 'agentmail';
-            am.value = ''; sl.value = ''; sle.value = ''; mode = 'agentmail'; upd();
+            await save('amKey', null); await save('slKey', null); await save('slRelay', null);
+            await save('slDomain', null); await save('slPrefix', null); await save('mode', null);
+            C.amKey = ''; C.slKey = ''; C.slRelay = ''; C.slDomain = ''; C.slPrefix = ''; C.mode = 'agentmail';
+            am.value = ''; sl.value = ''; sle.value = ''; sld.value = ''; slp.value = '';
+            mode = 'agentmail'; upd();
             notify('Ключи удалены', 'ok', 3000);
         };
         d.querySelector('#grepBtn').onclick = () => {
             settingsModal.remove(); settingsModal = null; copyReport();
         };
-        d.querySelector('#gdumpBtn').onclick = () => {
-            const dump = dumpGrokDOM();
-            console.log(dump);
-            try { if (typeof GM_setClipboard !== 'undefined') GM_setClipboard(dump, 'text'); } catch {}
-            notify('Дамп Grok DOM скопирован (см. консоль)', 'ok', 4000);
-        };
-
         setTimeout(() => am.focus(), 100);
     });
 }
@@ -628,6 +528,8 @@ async function ensureKeys() {
         C.amKey = k;
         C.slKey = (await load('slKey')) || '';
         C.slRelay = (await load('slRelay')) || '';
+        C.slDomain = (await load('slDomain')) || '';
+        C.slPrefix = (await load('slPrefix')) || '';
         C.mode = (await load('mode')) || 'agentmail';
         const ge = await load('grokEnabled');
         if (ge === false) C.grokEnabled = false;
@@ -660,6 +562,7 @@ async function createInbox() {
         const inboxObj = { id: d.inbox_id, email: d.inbox_id || d.email, username };
         verifyStats.inboxId = inboxObj.id;
         verifyStats.inboxEmail = inboxObj.email;
+        notify('AgentMail inbox создан: ' + inboxObj.email, 'ok', 5000);
         return inboxObj;
     } catch { return null; }
 }
@@ -696,13 +599,16 @@ async function getMsg(id, mid) {
 // ═══════════════════ SIMPLELOGIN ═══════════════════
 async function createAlias() {
     if (!C.slKey) { notify('SimpleLogin: ключ не задан', 'err'); return null; }
+    const body = { note: 'Auto Register' };
+    if (C.slDomain) body.domain = C.slDomain;
+    if (C.slPrefix) body.alias_prefix = C.slPrefix;
     const r = await reqRetry({
         method: 'POST', url: `${C.slBase}/api/alias/random/new`,
         headers: { Authentication: C.slKey, 'Content-Type': 'application/json', Accept: 'application/json' },
-        data: JSON.stringify({ note: 'Auto Register' }),
+        data: JSON.stringify(body),
     }, 'SimpleLogin');
     if (r.status !== 200 && r.status !== 201) {
-        notify(`SimpleLogin: ${r.status}`, 'err', 12000);
+        notify(`SimpleLogin: ${r.status} ${(r.responseText || '').slice(0,150)}`, 'err', 12000);
         return null;
     }
     try { const d = JSON.parse(r.responseText); return d.alias || d.email; } catch { return null; }
@@ -719,24 +625,24 @@ function extractCode(data) {
     return m[1];
 }
 const msgTime = m => new Date(m.timestamp || m.created_at || 0).getTime();
-const isFresh = m => !codeReqAt || msgTime(m) >= codeReqAt - C.tolMs;
 
-async function findCode() {
-    if (!inbox?.id) return { found: false, reason: 'no_inbox' };
-    const msgs = await listMsgs(inbox.id);
+async function findCodeFor(gs) {
+    if (!gs.inbox?.id) return { found: false, reason: 'no_inbox' };
+    const msgs = await listMsgs(gs.inbox.id);
     if (msgs?.__rate) return { found: false, reason: 'rate_limited' };
     if (!msgs) return { found: false, reason: 'api_error' };
     if (!msgs.length) return { found: false, reason: 'no_messages' };
     msgs.sort((a, b) => msgTime(b) - msgTime(a));
-    if (!verifyStats.firstMsgTime) verifyStats.firstMsgTime = msgTime(msgs[0]);
-    verifyStats.lastMsgCount = msgs.length;
-    const fresh = msgs.filter(isFresh);
+    const fresh = msgs.filter(m => !gs.codeReqAt || msgTime(m) >= gs.codeReqAt - C.tolMs);
     if (!fresh.length) return { found: false, reason: 'waiting', count: msgs.length };
     for (const m of fresh) {
-        if (usedIds.has(m.message_id)) continue;
-        const full = (await getMsg(inbox.id, m.message_id)) || m;
+        if (gs.usedIds.has(m.message_id)) continue;
+        const full = (await getMsg(gs.inbox.id, m.message_id)) || m;
         const code = extractCode(full);
-        if (code) return { found: true, code, msgId: m.message_id, age: Math.max(0, Math.round((Date.now() - msgTime(m)) / 1000)) };
+        if (code) {
+            gs.usedIds.add(m.message_id);
+            return { found: true, code, msgId: m.message_id };
+        }
     }
     return { found: false, reason: 'no_code', count: fresh.length };
 }
@@ -765,7 +671,6 @@ function findEmail() {
     return document.querySelector('input[type="email"]');
 }
 const findPwd = () => [...document.querySelectorAll('input[type="password"]')].find(el => el.offsetParent !== null) || null;
-
 function findCodeInp() {
     for (const s of ['input[id*="-code"]', 'input[name="code"]',
                      'input[placeholder*="код" i]', 'input[placeholder*="code" i]',
@@ -786,9 +691,8 @@ async function fillCode(code) {
     const t = findCodes();
     if (!t) return false;
     try {
-        if (t.type === 'single') {
-            await typeHuman(t.input, code);
-        } else {
+        if (t.type === 'single') await typeHuman(t.input, code);
+        else {
             for (let i = 0; i < t.inputs.length && i < code.length; i++) {
                 await focusEl(t.inputs[i]);
                 setVal(t.inputs[i], code[i]);
@@ -824,13 +728,10 @@ function genPwd() {
 async function clickCont() {
     for (const b of document.querySelectorAll('button,a,div[role="button"]')) {
         const t = b.textContent.trim().toLowerCase();
-        if (['continue','продолжить','next','далее','create','создать'].includes(t)) {
-            return click(b);
-        }
+        if (['continue','продолжить','next','далее','create','создать'].includes(t)) return click(b);
     }
     return false;
 }
-
 const loggedIn = () => !!document.querySelector('[data-testid="user-menu"],.user-menu') ||
     location.href.includes('/c/') ||
     (location.hostname.includes('chatgpt.com') && !hasLoginBtn() && !findEmail());
@@ -839,7 +740,6 @@ const hasLoginBtn = () => [...document.querySelectorAll('button,a,div[role="butt
 const onLogin = () => location.hostname.includes('auth.openai.com') || !!findEmail();
 const onProfile = () => { const f = findProfile(); return !!(f.name && f.age); };
 const onAboutYou = () => /about-you|profile|onboarding/i.test(location.href);
-
 function hasVerifyText() {
     const body = document.body?.innerText || '';
     return /Проверьте свою почту|Введите код подтверждения|Check your email|Enter the code|Enter verification/i.test(body);
@@ -847,11 +747,9 @@ function hasVerifyText() {
 
 // ═══════════════════ GROK MODULE ═══════════════════
 const GR = {
-    // Список id наших кнопок меню, которые НЕ надо трогать
     _ourIds: ['gpt-menu', 'gr', 'gc', 'gcp', 'gps', 'gset', 'ghlp'],
 
     findMethodEmailBtn() {
-        // Ищем кнопку "Зарегистрироваться через email"
         const btns = [...document.querySelectorAll('button, a[role="button"], div[role="button"]')];
         return btns.find(b => {
             const t = (b.textContent || '').trim().toLowerCase();
@@ -880,14 +778,10 @@ const GR = {
                null;
     },
     findGivenName() {
-        return document.querySelector('#givenName') ||
-               document.querySelector('input[name="givenName"]') ||
-               null;
+        return document.querySelector('#givenName') || document.querySelector('input[name="givenName"]') || null;
     },
     findFamilyName() {
-        return document.querySelector('#familyName') ||
-               document.querySelector('input[name="familyName"]') ||
-               null;
+        return document.querySelector('#familyName') || document.querySelector('input[name="familyName"]') || null;
     },
     findPwd() {
         return document.querySelector('#password') ||
@@ -897,7 +791,6 @@ const GR = {
     },
     findSubmit() {
         const btns = [...document.querySelectorAll('button[type="submit"]')];
-        // Исключаем наши кнопки меню
         const filtered = btns.filter(b => {
             if (this._ourIds.includes(b.id)) return false;
             if (b.closest('#gpt-menu, #gpt-status, .gpt-pnl, #gpt-report-modal')) return false;
@@ -909,6 +802,18 @@ const GR = {
             if (b) return b;
         }
         return filtered[0] || null;
+    },
+    findResendBtn() {
+        const btns = [...document.querySelectorAll('button, a[role="button"]')];
+        return btns.find(b => {
+            const t = (b.textContent || '').trim().toLowerCase();
+            return b.offsetParent !== null && /отправить повторно|resend|request a new/i.test(t);
+        }) || null;
+    },
+    // Детект ошибки "код неверный/истёк"
+    hasCodeError() {
+        const t = document.body?.innerText || '';
+        return /That code is invalid|code is invalid or has expired|Неверный код|Код истёк|expired/i.test(t);
     },
     hasTurnstile() {
         return !!document.querySelector('input[name="cf-turnstile-response"]') ||
@@ -935,7 +840,6 @@ const GR = {
     },
 
     detectStage() {
-        // Порядок важен: сначала проверяем специфичные этапы
         if (this.hasProfileText()) return 'profile';
         if (this.hasCodeText()) return 'code';
         if (this.hasEmailText()) return 'email';
@@ -950,15 +854,10 @@ const GR = {
         await click(btn);
         GS.methodDone = true;
         await save('gr_methodDone', true);
-        // Ждём появления формы email
         for (let i = 0; i < 20; i++) {
             await sleep(300);
-            if (this.findEmail()) {
-                log('INFO', 'GR', 'email form appeared after ' + (i*300) + 'ms');
-                return true;
-            }
+            if (this.findEmail()) return true;
         }
-        log('WARN', 'GR', 'email form did not appear after method click');
         return false;
     },
 
@@ -969,7 +868,7 @@ const GR = {
         await typeHuman(inp, email);
         await delay(200, 500);
         const btn = this.findSubmit();
-        if (!btn) { notify('[GR] Кнопка "Зарегистрироваться" не найдена', 'err'); return false; }
+        if (!btn) { notify('[GR] Кнопка не найдена', 'err'); return false; }
         await click(btn);
         GS.emailDone = true;
         GS.codeReqAt = Date.now();
@@ -989,6 +888,13 @@ const GR = {
         const btn = this.findSubmit();
         if (!btn) { notify('[GR] Кнопка "Подтвердить email" не найдена', 'err'); return false; }
         await click(btn);
+        // Ждём 2.5 секунды и проверяем, не выдал ли Grok ошибку
+        await sleep(2500);
+        if (this.hasCodeError()) {
+            GS.lastError = 'code_invalid';
+            log('WARN', 'GR', 'code rejected by Grok (invalid/expired)');
+            return false;
+        }
         GS.codeDone = true;
         await save('gr_codeDone', true);
         return true;
@@ -1010,24 +916,15 @@ const GR = {
                 GS.turnstileWaitStart = Date.now();
                 for (let i = 0; i < 60; i++) {
                     await sleep(2000);
-                    if (this.turnstileSolved()) {
-                        GS.turnstileSolved = true;
-                        notify('[GR] ✓ Капча пройдена', 'ok', 3000);
-                        break;
-                    }
+                    if (this.turnstileSolved()) { GS.turnstileSolved = true; notify('[GR] ✓ Капча пройдена', 'ok', 3000); break; }
                     if (i === 29) notify('[GR] Всё ещё ждём капчу…', 'warn', 5000);
                 }
-                if (!this.turnstileSolved()) {
-                    notify('[GR] Капча не пройдена, пропускаю шаг', 'err', 8000);
-                    return false;
-                }
-            } else {
-                GS.turnstileSolved = true;
-            }
+                if (!this.turnstileSolved()) { notify('[GR] Капча не пройдена', 'err', 8000); return false; }
+            } else GS.turnstileSolved = true;
         }
 
         const btn = this.findSubmit();
-        if (!btn) { notify('[GR] Кнопка "Завершить регистрацию" не найдена', 'err'); return false; }
+        if (!btn) { notify('[GR] Кнопка не найдена', 'err'); return false; }
         await click(btn);
         GS.profileDone = true;
         await save('gr_profileDone', true);
@@ -1044,24 +941,17 @@ const GR = {
         log('INFO', 'GR', 'run() stage=' + stage);
 
         if (stage === 'unknown') {
-            const dump = dumpGrokDOM();
-            log('WARN', 'GR', 'unknown stage. DOM dump:\n' + dump);
-            console.log('=== GROK UNKNOWN STAGE — DOM DUMP ===\n' + dump);
-            notify('[GR] Не понял этап. Скинь отчёт: ☰ → Настройки → Диагностика → Скопировать отчёт', 'warn', 12000);
-            showReportModal(dump, false);
+            notify('[GR] Не понял этап. Скинь отчёт.', 'warn', 12000);
             return;
         }
         GS.running = true;
         try {
             if (stage === 'method') {
                 await this.submitMethod();
-                // После клика ждём появления формы email, потом продолжаем
                 await sleep(1500);
                 if (this.findEmail()) {
                     const email = await this.prepareEmail();
                     if (email) await this.submitEmail(email);
-                } else {
-                    notify('[GR] Форма email не появилась. Проверь вручную.', 'warn', 8000);
                 }
             } else if (stage === 'email' && !GS.emailDone) {
                 const email = await this.prepareEmail();
@@ -1080,28 +970,26 @@ const GR = {
                 notify('[GR] 🔑 Пароль: ' + pwd, 'warn', 20000);
                 try { GM_setClipboard(pwd, 'text'); } catch {}
                 await this.submitProfile(data);
-            } else {
-                log('INFO', 'GR', 'stage=' + stage + ' already done. method=' + GS.methodDone + ' email=' + GS.emailDone + ' code=' + GS.codeDone + ' profile=' + GS.profileDone);
             }
-        } catch (e) {
-            log('ERROR', 'GR', e);
-        }
+        } catch (e) { log('ERROR', 'GR', e); }
         GS.running = false;
     },
 
     async prepareEmail() {
-        if (GS.inbox?.email) {
+        // ВСЕГДА создаём новый inbox, если его нет (не подхватываем из storage)
+        if (GS.inbox?.email && !GS.forceNewInbox) {
             notify('[GR] Использую почту: ' + GS.inbox.email, 'info', 4000);
             return GS.inbox.email;
         }
+        GS.forceNewInbox = false;
         setStatus('Почта GR…');
         let email;
         if (C.mode === 'simplelogin') {
-            if (!C.slRelay) { notify('[GR] Не указан AgentMail email для SimpleLogin', 'err', 10000); return null; }
+            if (!C.slRelay) { notify('[GR] Не указан AgentMail relay email', 'err', 10000); return null; }
             const ib = await listInboxes();
             if (!ib.length) { notify('[GR] AgentMail: нет inbox', 'err', 12000); return null; }
             const relay = ib.find(i => (i.inbox_id || i.email) === C.slRelay);
-            if (!relay) { notify('[GR] AgentMail: ящик ' + C.slRelay + ' не найден', 'err', 10000); return null; }
+            if (!relay) { notify('[GR] AgentMail: relay не найден: ' + C.slRelay, 'err', 10000); return null; }
             GS.inbox = { id: relay.inbox_id, email: relay.inbox_id || relay.email };
             const alias = await createAlias();
             if (!alias) return null;
@@ -1127,6 +1015,7 @@ const GR = {
             notify('[GR] Почта: ' + email, 'info', 6000);
         }
         GS.usedIds = new Set();
+        GS.consecutiveNoCode = 0;
         await save('gr_inbox', GS.inbox);
         await save('gr_email', email);
         return email;
@@ -1136,9 +1025,10 @@ const GR = {
         if (GS.polling) return;
         GS.polling = true;
         GS.attempts = 0;
+        GS.consecutiveNoCode = 0;
         if (!GS.inbox?.id) GS.inbox = await load('gr_inbox');
         if (!GS.inbox?.id) {
-            notify('[GR] Нет ящика. Начните с этапа email.', 'err', 8000);
+            notify('[GR] Нет ящика.', 'err', 8000);
             GS.polling = false;
             return;
         }
@@ -1148,15 +1038,49 @@ const GR = {
         for (let i = 0; i < C.maxTries; i++) {
             GS.attempts = i + 1;
             if (GS.attempts <= 3 || GS.attempts % 5 === 0) setStatus('#GR' + GS.attempts);
+
             const r = await findCodeFor(GS);
             GS.lastReason = r.reason || null;
+
             if (r.found) {
                 GS.lastCode = r.code;
+                GS.consecutiveNoCode = 0;
                 notify('[GR] Код найден: ' + r.code, 'ok', 6000);
-                await this.submitCode(r.code);
-                GS.polling = false;
-                setStatus('');
-                return;
+                const ok = await this.submitCode(r.code);
+                if (!ok && GS.lastError === 'code_invalid') {
+                    // Grok отверг код — жмём "Отправить повторно" и ждём новое письмо
+                    notify('[GR] Код отвергнут Grok. Жму "Отправить повторно"…', 'warn', 6000);
+                    const resend = this.findResendBtn();
+                    if (resend) {
+                        await click(resend);
+                        GS.codeReqAt = Date.now();
+                        await save('gr_codeReqAt', GS.codeReqAt);
+                        GS.lastError = null;
+                        // Чистим usedIds, чтобы новые письма могли пройти
+                        // (старые остаются в usedIds, чтобы не подхватить их повторно)
+                        GS.attempts = 0;
+                        await sleep(3000);
+                        continue;
+                    } else {
+                        notify('[GR] Кнопка "Отправить повторно" не найдена', 'err', 6000);
+                        break;
+                    }
+                }
+                if (ok) {
+                    GS.polling = false;
+                    setStatus('');
+                    return;
+                }
+            } else {
+                if (r.reason === 'no_code') GS.consecutiveNoCode++;
+                else GS.consecutiveNoCode = 0;
+                // Если 10 попыток подряд fresh-письма без кода — сдаёмся
+                if (GS.consecutiveNoCode >= 10) {
+                    notify('[GR] 10 попыток без валидного кода — стоп. Проверь почту вручную.', 'err', 15000);
+                    GS.polling = false;
+                    setStatus('');
+                    return;
+                }
             }
             await sleep(C.interval);
         }
@@ -1165,27 +1089,6 @@ const GR = {
         setStatus('');
     },
 };
-
-async function findCodeFor(gs) {
-    if (!gs.inbox?.id) return { found: false, reason: 'no_inbox' };
-    const msgs = await listMsgs(gs.inbox.id);
-    if (msgs?.__rate) return { found: false, reason: 'rate_limited' };
-    if (!msgs) return { found: false, reason: 'api_error' };
-    if (!msgs.length) return { found: false, reason: 'no_messages' };
-    msgs.sort((a, b) => msgTime(b) - msgTime(a));
-    const fresh = msgs.filter(m => !gs.codeReqAt || msgTime(m) >= gs.codeReqAt - C.tolMs);
-    if (!fresh.length) return { found: false, reason: 'waiting', count: msgs.length };
-    for (const m of fresh) {
-        if (gs.usedIds.has(m.message_id)) continue;
-        const full = (await getMsg(gs.inbox.id, m.message_id)) || m;
-        const code = extractCode(full);
-        if (code) {
-            gs.usedIds.add(m.message_id);
-            return { found: true, code, msgId: m.message_id };
-        }
-    }
-    return { found: false, reason: 'no_code', count: fresh.length };
-}
 
 // ═══════════════════ ДИАЛОГ ═══════════════════
 function emailDialog() {
@@ -1225,27 +1128,18 @@ function showHelp() {
     m.style.cssText = 'padding:24px;border-radius:20px;max-width:680px;width:92%;max-height:85vh;overflow-y:auto;color:var(--gfg);animation:gIn .3s var(--gease) both';
     m.innerHTML = `
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
-<h2 style="margin:0;font-size:20px;font-weight:600">Помощь — Auto Register</h2>
+<h2 style="margin:0;font-size:20px;font-weight:600">Помощь</h2>
 <button id="ch" style="background:none;border:none;font-size:24px;cursor:pointer;color:var(--gmut);padding:0 5px">×</button></div>
 <div style="line-height:1.6;font-size:14px">
-<div style="margin-bottom:22px">
-<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">⚙️ Настройка</h3>
-<p style="margin:0;color:var(--gmut);font-size:13px">☰ → Настройки → Общее — заполните AgentMail / SimpleLogin ключи.</p>
-</div>
-<div style="margin-bottom:22px">
-<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">🚀 Grok (accounts.x.ai)</h3>
-<ol style="margin:0;padding-left:20px;color:var(--gmut);font-size:13px;line-height:1.7">
+<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600">🚀 Grok</h3>
+<ol style="margin:0 0 20px 0;padding-left:20px;color:var(--gmut);font-size:13px;line-height:1.7">
 <li>Откройте <b style="color:var(--gfg)">accounts.x.ai/sign-up</b>.</li>
-<li>Нажмите <b style="color:var(--gfg)">☰ → Регистрация Grok</b>.</li>
-<li>Скрипт сам нажмёт «Зарегистрироваться через email», создаст почту и введёт email.</li>
-<li>Дождётся кода, введёт его, заполнит имя/пароль.</li>
-<li>Капчу Cloudflare Turnstile проходите вручную — скрипт ждёт до 2 минут.</li>
+<li>☰ → <b style="color:var(--gfg)">Регистрация Grok</b>.</li>
+<li>Скрипт сам: выберет email → создаст ящик → введёт email → дождётся кода → введёт код → заполнит профиль.</li>
+<li>Капчу Cloudflare проходите вручную.</li>
 </ol>
-</div>
-<div>
-<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">🔧 Диагностика</h3>
-<p style="margin:0;color:var(--gmut);font-size:13px">☰ → Настройки → Диагностика → «Скопировать отчёт» — если что-то пошло не так.</p>
-</div>
+<h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600">📧 SimpleLogin</h3>
+<p style="margin:0 0 12px 0;color:var(--gmut);font-size:13px">Если xAI блокирует домен simplelogin — укажите в настройках свой домен (например <code>sl.mysite.com</code>) и опционально префикс алиаса.</p>
 </div>`;
     helpModal.appendChild(m);
     document.body.appendChild(helpModal);
@@ -1270,26 +1164,17 @@ function setStatus(t, c) {
     statusLbl.style.color = c || 'var(--gfg)';
 }
 
-// ChatGPT — как было (слева, 56px). Grok — слева, 12px.
 function posMenu() {
     if (!menuBtn) return;
     const isMob = innerWidth < 768;
-    const host = location.hostname;
-
     if (isGrok()) {
-        // Grok: слева, близко к краю (там нет гамбургера ChatGPT)
         const left = isMob ? 8 : 12;
-        menuBtn.style.left = left + 'px';
-        menuBtn.style.right = 'auto';
-        menuBtn.style.top = '8px';
+        menuBtn.style.left = left + 'px'; menuBtn.style.right = 'auto'; menuBtn.style.top = '8px';
         if (menuPnl) { menuPnl.style.left = left + 'px'; menuPnl.style.right = 'auto'; menuPnl.style.top = '52px'; }
         if (statusLbl) { statusLbl.style.left = left + 'px'; statusLbl.style.right = 'auto'; statusLbl.style.top = '44px'; }
     } else {
-        // ChatGPT — как было
         const left = isMob ? 52 : 56;
-        menuBtn.style.left = left + 'px';
-        menuBtn.style.right = 'auto';
-        menuBtn.style.top = '8px';
+        menuBtn.style.left = left + 'px'; menuBtn.style.right = 'auto'; menuBtn.style.top = '8px';
         if (menuPnl) { menuPnl.style.left = left + 'px'; menuPnl.style.right = 'auto'; menuPnl.style.top = '52px'; }
         if (statusLbl) { statusLbl.style.left = left + 'px'; statusLbl.style.right = 'auto'; statusLbl.style.top = '44px'; }
     }
@@ -1395,10 +1280,7 @@ function createMenu() {
 
     posMenu();
     addEventListener('resize', posMenu);
-    try {
-        const obs = new MutationObserver(() => posMenu());
-        obs.observe(document.body, { childList: true, subtree: true });
-    } catch (e) {}
+    try { new MutationObserver(posMenu).observe(document.body, { childList: true, subtree: true }); } catch (e) {}
 
     document.addEventListener('click', e => {
         if (menuPnl && menuPnl.style.display === 'flex' &&
@@ -1434,17 +1316,13 @@ async function stageMain() {
     if (btn) {
         await click(btn);
         urlWatch(() => { loginTried = false; if (!regDone) runStage(); }, 10000);
-    } else {
-        notify('Кнопка "Войти" не найдена', 'err');
-        loginTried = false;
-    }
+    } else { notify('Кнопка "Войти" не найдена', 'err'); loginTried = false; }
 }
 
 async function stageLogin() {
     if (regDone) return;
     const choice = await emailDialog();
     if (choice === 'cancel') return;
-
     let email;
     if (choice === 'new') {
         setStatus('Почта…');
@@ -1489,20 +1367,14 @@ async function stageLogin() {
     } else {
         const saved = await load('inbox');
         if (!saved?.id) { notify('Нет сохранённой почты', 'warn', 6000); return setStatus(''); }
-        setStatus('Проверка…');
         const ib = await listInboxes();
         const ok = ib.some(i => (i.inbox_id || i.email) === saved.id || (i.inbox_id || i.email) === saved.email);
-        if (!ok) {
-            notify('Прошлый ящик удалён. Создайте новый.', 'warn', 8000);
-            await save('inbox', null); await save('email', null);
-            return setStatus('');
-        }
+        if (!ok) { notify('Прошлый ящик удалён.', 'warn', 8000); await save('inbox', null); return setStatus(''); }
         inbox = saved;
         email = (await load('email')) || saved.email;
         codeReqAt = (await load('codeReqAt')) || Date.now();
         notify(`Продолжаю с ${email}`, 'info', 4000);
     }
-
     let inp = null;
     for (let i = 0; i < 8 && !inp; i++) { inp = findEmail(); if (!inp) await sleep(300); }
     if (!inp) { notify('Поле email не найдено', 'err'); return setStatus(''); }
@@ -1517,12 +1389,7 @@ async function stagePwd() {
     const inp = findPwd();
     if (!inp) { running = false; return runStage(); }
     let pwd = await load('pwd');
-    if (!pwd) {
-        pwd = genPwd();
-        await save('pwd', pwd);
-        notify(`🔑 Пароль: ${pwd}`, 'warn', 20000);
-        try { GM_setClipboard(pwd, 'text'); } catch {}
-    }
+    if (!pwd) { pwd = genPwd(); await save('pwd', pwd); notify(`🔑 Пароль: ${pwd}`, 'warn', 20000); try { GM_setClipboard(pwd, 'text'); } catch {} }
     setStatus('Пароль…');
     await typeHuman(inp, pwd);
     pwdDone = true;
@@ -1537,9 +1404,7 @@ async function watchCode() {
     while (Date.now() - start < 120000) {
         await sleep(1500);
         if (regDone) { setCanContinue(false); return; }
-        if (onProfile() || findPwd() || onAboutYou()) {
-            setCanContinue(false); running = false; return runStage();
-        }
+        if (onProfile() || findPwd() || onAboutYou()) { setCanContinue(false); running = false; return runStage(); }
         if (!findCodes()) {
             await sleep(1000);
             if (!findCodes()) { setCanContinue(false); running = false; return runStage(); }
@@ -1553,26 +1418,15 @@ async function stageVerify() {
     if (codeDone) { verifyDone = true; return stageProfile(); }
     polling = true;
     verifyStats.attempts = 0;
-
     if (codeReqAt == null) codeReqAt = (await load('codeReqAt')) || Date.now();
     if (!inbox?.id) inbox = await load('inbox');
-    if (!inbox?.id) {
-        const em = await load('email');
-        if (em) {
-            const ib = await listInboxes();
-            const f = ib.find(i => (i.inbox_id || i.email) === em);
-            if (f) { inbox = { id: f.inbox_id, email: f.inbox_id || f.email }; await save('inbox', inbox); }
-        }
-    }
-    if (!inbox?.id) { notify('Нет ящика. Создайте новую регистрацию.', 'err', 10000); polling = false; return; }
+    if (!inbox?.id) { notify('Нет ящика.', 'err', 10000); polling = false; return; }
     verifyStats.inboxId = inbox.id;
     verifyStats.inboxEmail = inbox.email;
     notify(`Проверка: ${inbox.email}`, 'info', 4000);
-
     for (let i = 0; i < C.maxTries; i++) {
-        const at = i + 1;
-        verifyStats.attempts = at;
-        if (at <= 3 || at % 5 === 0) { notify(`Проверка #${at}/${C.maxTries}`, 'dbg', 2000); setStatus(`#${at}`); }
+        verifyStats.attempts = i + 1;
+        if (i < 3 || i % 5 === 0) { notify(`Проверка #${i+1}/${C.maxTries}`, 'dbg', 2000); setStatus(`#${i+1}`); }
         const r = await findCode();
         verifyStats.lastReason = r.reason || null;
         if (r.found) {
@@ -1593,7 +1447,7 @@ async function stageVerify() {
         }
         await sleep(C.interval);
     }
-    notify('Код не найден. Проверьте почту вручную.', 'err', 15000);
+    notify('Код не найден.', 'err', 15000);
     polling = false;
 }
 
@@ -1608,17 +1462,11 @@ async function stageProfile() {
         await clickCont();
         profileDone = true;
         urlWatch(() => { if (!regDone) runStage(); }, 15000);
-    } else {
-        running = false;
-        runStage();
-    }
+    } else { running = false; runStage(); }
 }
 
 function runStage() {
-    if (isGrok()) {
-        if (C.grokEnabled) GR.run();
-        return;
-    }
+    if (isGrok()) { if (C.grokEnabled) GR.run(); return; }
     if (!running || regDone) return;
     if (findPwd() && !pwdDone) return stagePwd();
     if (onProfile() && !profileDone) return stageProfile();
@@ -1640,14 +1488,31 @@ function detect() {
 
 async function startReg() {
     if (isGrok()) {
-        if (!C.grokEnabled) { notify('Grok выключен в настройках', 'warn', 5000); return; }
+        if (!C.grokEnabled) { notify('Grok выключен', 'warn', 5000); return; }
         log('INFO', 'startReg', 'Grok registration');
         GS.methodDone = false; GS.emailDone = false; GS.codeDone = false; GS.profileDone = false; GS.regDone = false;
-        GS.turnstileSolved = false; GS.detectedStage = null;
-        await save('gr_codeDone', false);
-        await save('gr_profileDone', false);
-        await save('gr_emailDone', false);
-        await save('gr_methodDone', false);
+        GS.turnstileSolved = false; GS.detectedStage = null; GS.lastError = null;
+        // Спрашиваем: новая или продолжить
+        const choice = await emailDialog();
+        if (choice === 'cancel') return;
+        if (choice === 'new') {
+            // Форсируем создание нового inbox
+            GS.inbox = null;
+            GS.forceNewInbox = true;
+            await save('gr_inbox', null);
+            await save('gr_codeDone', false);
+            await save('gr_profileDone', false);
+            await save('gr_emailDone', false);
+            await save('gr_methodDone', false);
+        } else {
+            // Продолжить: оставляем inbox из storage
+            GS.inbox = await load('gr_inbox');
+            GS.codeReqAt = await load('gr_codeReqAt');
+            const c = await load('gr_codeDone'); if (c) GS.codeDone = true;
+            const p = await load('gr_profileDone'); if (p) GS.profileDone = true;
+            const e = await load('gr_emailDone'); if (e) GS.emailDone = true;
+            const m = await load('gr_methodDone'); if (m) GS.methodDone = true;
+        }
         const ok = await ensureKeys();
         if (!ok) { notify('Ключи не заданы', 'warn', 5000); return; }
         await sleep(300);
@@ -1667,42 +1532,21 @@ async function startReg() {
 async function init() {
     if (inited) return;
     inited = true;
-    log('INFO', 'init', 'start. host=' + location.hostname + ' path=' + location.pathname);
+    log('INFO', 'init', 'start. host=' + location.hostname);
     injectCSS();
-
     const dbg = await load('debug');
     if (dbg === true) C.debug = true;
     const ge = await load('grokEnabled');
     if (ge === false) C.grokEnabled = false;
-
     createMenu();
     updateMenu();
-
     await sleep(300);
-
     if (isGrok()) {
-        const methodDoneSaved = await load('gr_methodDone');
-        const emailDoneSaved = await load('gr_emailDone');
-        const codeDoneSaved = await load('gr_codeDone');
-        const profileDoneSaved = await load('gr_profileDone');
-        if (methodDoneSaved) GS.methodDone = true;
-        if (emailDoneSaved) GS.emailDone = true;
-        if (codeDoneSaved) GS.codeDone = true;
-        if (profileDoneSaved) GS.profileDone = true;
-        GS.inbox = await load('gr_inbox');
-        GS.codeReqAt = await load('gr_codeReqAt');
-
+        // НЕ восстанавливаем GS.inbox автоматически — только если пользователь нажмёт "Продолжить"
         const stage = GR.detectStage();
         log('INFO', 'init', 'Grok stage=' + stage);
-        // Автозапуск только если регистрация уже начата (есть сохранённый inbox)
-        if (C.grokEnabled && GS.inbox?.id && stage !== 'unknown' && !GS.regDone) {
-            if (stage === 'code' || stage === 'profile') {
-                setTimeout(() => GR.run(), 1500);
-            }
-        }
         return;
     }
-
     if (!loggedIn() && !onLogin() && !regDone && !running) {
         setTimeout(() => { if (!running) { running = true; runStage(); } }, 1000);
     } else if (findCodes() || hasVerifyText()) {
