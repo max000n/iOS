@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Auto Register (AgentMail + SimpleLogin)
 // @namespace    http://tampermonkey.net/
-// @version      71.0
-// @description  Авторегистрация ChatGPT + стиль ChatGPT + настройки с динамическими блоками
+// @version      72.0
+// @description  Авторегистрация ChatGPT + кнопка Продолжить + сдвиг логотипа
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://auth.openai.com/*
@@ -30,6 +30,7 @@
         fastMode: true,
         deleteInboxAfterUse: true,
         maxRetries: 3,
+        shiftChatGPT: true,   // сдвигать логотип ChatGPT вправо, чтобы не перекрывать кнопку
     };
 
     let codeInserted = false, profileFilled = false, registrationComplete = false,
@@ -39,8 +40,13 @@
     let codeRequestedAt = null, usedMessageIds = new Set(), urlWatcher = null;
     let helpModal = null, settingsModal = null, savedContext = null;
 
+    // Флаги одноразовых уведомлений и ручного продолжения
+    let completionNotified = false;
+    let manualContinueAvailable = false;
+    let manualContinueHandler = null;
+
     // ============================================
-    // CSS: палитра ChatGPT
+    // CSS
     // ============================================
     function injectThemeStyles() {
         if (document.getElementById('gpt-auto-theme-styles')) return;
@@ -152,6 +158,10 @@
                 from { opacity: 0; transform: translateY(-4px); }
                 to   { opacity: 1; transform: translateY(0); }
             }
+            @keyframes gptPulse {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.5; }
+            }
 
             .gpt-menu-panel { animation: gptMenuIn .25s var(--gpt-ease) both; }
             .gpt-menu-item {
@@ -163,6 +173,24 @@
 
             .gpt-field-block {
                 animation: gptSlideDown .25s var(--gpt-ease) both;
+            }
+
+            /* Кнопка «Продолжить» — акцентная, привлекает внимание */
+            .gpt-continue-btn {
+                animation: gptPulse 1.6s ease-in-out infinite;
+            }
+
+            /* Сдвиг логотипа ChatGPT, чтобы не перекрывать кнопку меню */
+            body.gpt-shifted #page-header > div:first-child,
+            body.gpt-shifted main > div > div:first-child > div:first-child {
+                transform: translateX(70px);
+                transition: transform .25s var(--gpt-ease);
+            }
+            @media (max-width: 767px) {
+                body.gpt-shifted #page-header > div:first-child,
+                body.gpt-shifted main > div > div:first-child > div:first-child {
+                    transform: translateX(60px);
+                }
             }
         `;
         document.head.appendChild(s);
@@ -781,6 +809,7 @@
                         <li>Откройте chatgpt.com (не авторизованы).</li>
                         <li>☰ → Регистрация → «Новая регистрация».</li>
                         <li>Скрипт сам создаст почту, введёт email, дождётся кода, вставит код, при необходимости создаст пароль и заполнит профиль.</li>
+                        <li>Если код не подхватился — в меню появится кнопка «Продолжить».</li>
                         <li>Пароль будет показан в уведомлении — сохраните его.</li>
                     </ol>
                 </div>
@@ -806,6 +835,7 @@
     const ICON_COPY = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
     const ICON_PASTE = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>`;
     const ICON_REGISTER = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`;
+    const ICON_CONTINUE = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
     const ICON_SETTINGS = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
     const ICON_HELP = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
 
@@ -896,12 +926,23 @@
         if (!menuPanel) return;
         const loggedIn = isUserLoggedIn();
         const register = menuPanel.querySelector('#gpt-register-btn');
+        const cont = menuPanel.querySelector('#gpt-continue-btn');
         const copy = menuPanel.querySelector('#gpt-copy-btn');
         const paste = menuPanel.querySelector('#gpt-paste-btn');
 
-        if (register) register.style.display = loggedIn ? 'none' : 'flex';
+        // Регистрация — только если не авторизованы и не завершено
+        if (register) register.style.display = (!loggedIn && !registrationComplete) ? 'flex' : 'none';
+        // Продолжить — только если доступно ручное продолжение
+        if (cont) cont.style.display = manualContinueAvailable ? 'flex' : 'none';
+        // Копировать/Вставить — только когда авторизованы
         if (copy) copy.style.display = loggedIn ? 'flex' : 'none';
         if (paste) paste.style.display = loggedIn ? 'flex' : 'none';
+    }
+
+    // ⚡ Показ/скрытие кнопки «Продолжить»
+    function setManualContinue(available) {
+        manualContinueAvailable = available;
+        if (menuVisible) updateMenuItems();
     }
 
     function createMenu() {
@@ -949,10 +990,10 @@
             max-width:calc(100vw - 32px);
         `;
 
-        const makeBtn = (id, icon, text, onClick, delay = 0) => {
+        const makeBtn = (id, icon, text, onClick, delay = 0, extraClass = '') => {
             const b = document.createElement('button');
             b.id = id;
-            b.className = 'gpt-menu-item';
+            b.className = 'gpt-menu-item' + (extraClass ? ' ' + extraClass : '');
             b.innerHTML = `<span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;margin-right:8px;opacity:.85;">${icon}</span><span style="font-size:14px;">${text}</span>`;
             b.style.cssText = `display:flex;align-items:center;padding:10px 12px;background:transparent;color:var(--gpt-fg);border:none;border-radius:10px;cursor:pointer;font-weight:500;text-align:left;animation-delay:${delay}ms;`;
             b.onclick = (e) => { e.stopPropagation(); onClick(); };
@@ -960,10 +1001,16 @@
         };
 
         menuPanel.appendChild(makeBtn('gpt-register-btn', ICON_REGISTER, 'Регистрация', () => { closeMenu(); startRegistration(); }, 0));
-        menuPanel.appendChild(makeBtn('gpt-copy-btn', ICON_COPY, 'Копировать контекст', copyContext, 40));
-        menuPanel.appendChild(makeBtn('gpt-paste-btn', ICON_PASTE, 'Вставить контекст', pasteContext, 80));
-        menuPanel.appendChild(makeBtn('gpt-settings-btn', ICON_SETTINGS, 'Настройки', () => { closeMenu(); showSettingsDialog(); }, 120));
-        menuPanel.appendChild(makeBtn('gpt-help-btn', ICON_HELP, 'Помощь', () => { closeMenu(); showHelpModal(); }, 160));
+        menuPanel.appendChild(makeBtn('gpt-continue-btn', ICON_CONTINUE, 'Продолжить', () => {
+            closeMenu();
+            setManualContinue(false);
+            isRunning = false;
+            runStage();
+        }, 40, 'gpt-continue-btn'));
+        menuPanel.appendChild(makeBtn('gpt-copy-btn', ICON_COPY, 'Копировать контекст', copyContext, 80));
+        menuPanel.appendChild(makeBtn('gpt-paste-btn', ICON_PASTE, 'Вставить контекст', pasteContext, 120));
+        menuPanel.appendChild(makeBtn('gpt-settings-btn', ICON_SETTINGS, 'Настройки', () => { closeMenu(); showSettingsDialog(); }, 160));
+        menuPanel.appendChild(makeBtn('gpt-help-btn', ICON_HELP, 'Помощь', () => { closeMenu(); showHelpModal(); }, 200));
 
         document.body.appendChild(menuButton);
         document.body.appendChild(menuPanel);
@@ -981,6 +1028,11 @@
             if (menuPanel) menuPanel.style.left = newLeft;
             if (statusLabel) statusLabel.style.left = newLeft;
         });
+
+        // ⚡ Сдвигаем логотип ChatGPT вправо
+        if (CONFIG.shiftChatGPT) {
+            document.body.classList.add('gpt-shifted');
+        }
     }
 
     // ============================================
@@ -1139,23 +1191,29 @@
         const start = Date.now();
         const maxWait = 120000;
 
+        // Пока ждём — показываем кнопку «Продолжить» в меню
+        setManualContinue(true);
+
         while (Date.now() - start < maxWait) {
             await new Promise(r => setTimeout(r, 1500));
-            if (registrationComplete) return;
+            if (registrationComplete) { setManualContinue(false); return; }
 
             if (isOnProfilePage()) {
                 showNotification('Код принят. Заполняю профиль…', 'info', 4000);
+                setManualContinue(false);
                 isRunning = false;
                 runStage();
                 return;
             }
             if (findPasswordInput()) {
                 showNotification('Код принят. Переход к паролю…', 'info', 4000);
+                setManualContinue(false);
                 isRunning = false;
                 runStage();
                 return;
             }
             if (isOnAboutYouPage()) {
+                setManualContinue(false);
                 isRunning = false;
                 runStage();
                 return;
@@ -1163,6 +1221,7 @@
             if (!findCodeInputs()) {
                 await new Promise(r => setTimeout(r, 1000));
                 if (!findCodeInputs()) {
+                    setManualContinue(false);
                     isRunning = false;
                     runStage();
                     return;
@@ -1170,9 +1229,8 @@
             }
         }
 
-        showNotification('Таймаут ожидания. Продолжаю…', 'warning', 5000);
-        isRunning = false;
-        runStage();
+        // Таймаут — оставляем кнопку «Продолжить» доступной
+        showNotification('Авто-переход не сработал. Нажмите «Продолжить» в меню.', 'warning', 12000);
     }
 
     async function stageVerify() {
@@ -1277,8 +1335,15 @@
         if (await clickContinue()) {
             registrationComplete = true;
             await saveData('complete', true);
-            showNotification('Регистрация завершена!', 'info', 8000);
+
+            // ⚡ Уведомление показываем ровно один раз
+            if (!completionNotified) {
+                completionNotified = true;
+                showNotification('Регистрация завершена!', 'info', 8000);
+            }
+
             setMenuStatus('✓', 'var(--gpt-fg)');
+            setManualContinue(false);
 
             if (menuPanel) {
                 const register = menuPanel.querySelector('#gpt-register-btn');
@@ -1341,6 +1406,8 @@
 
         setMenuStatus('Старт', 'var(--gpt-fg)');
         loginAttempted = false; verifyCompleted = false; codeInserted = false; passwordFilled = false;
+        completionNotified = false;
+        setManualContinue(false);
         isRunning = false;
         try {
             await runStage();
@@ -1382,6 +1449,7 @@
             const wasComplete = await getData('complete');
             if (wasComplete && isUserLoggedIn()) {
                 registrationComplete = true;
+                completionNotified = true; // чтобы не показывать повторно
             } else if (wasComplete && !isUserLoggedIn()) {
                 await saveData('complete', null);
                 registrationComplete = false;
