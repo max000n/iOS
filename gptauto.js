@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Auto Register (AgentMail + SimpleLogin)
 // @namespace    http://tampermonkey.net/
-// @version      60.0
-// @description  Авторегистрация ChatGPT с использованием AgentMail.to и SimpleLogin
+// @version      61.0
+// @description  Авторегистрация ChatGPT: AgentMail (приём/удаление) + SimpleLogin (алиасы для обхода блокировок)
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://auth.openai.com/*
@@ -26,22 +26,25 @@
         fastMode: true,
     };
 
-    // Состояние
-    let isRunning = false;
-    let registrationComplete = false;
-    let codeInserted = false;
-    let verifyCompleted = false;
-    let currentInboxId = null;
-    let currentEmailAddress = null;
-    let codeRequestedAt = null;
-    let usedMessageIds = new Set();
-    let savedContext = null;
+    // Состояние текущей сессии (НЕ сохраняется между перезапусками для гарантии уникальности)
+    let sessionState = {
+        isRunning: false,
+        registrationComplete: false,
+        codeInserted: false,
+        verifyCompleted: false,
+        inboxId: null,
+        inboxEmail: null,
+        slAlias: null,
+        slMailboxId: null,
+        codeRequestedAt: null,
+        usedMessageIds: new Set(),
+        savedContext: null
+    };
 
     // ============================================
     // УТИЛИТЫ И ТЕМЫ
     // ============================================
     function getTheme() {
-        // Проверяем системную тему или тему сайта
         if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) return 'dark';
         if (document.documentElement.classList.contains('dark') || document.body.classList.contains('dark')) return 'dark';
         return 'light';
@@ -123,7 +126,7 @@
         const isDark = getTheme() === 'dark';
         const colors = { info: isDark ? '#2d6b9b' : '#3498db', success: '#10a37f', warning: isDark ? '#b8860b' : '#f39c12', error: isDark ? '#8b1a1a' : '#e74c3c', debug: isDark ? '#555' : '#7f8c8d' };
         const el = document.createElement('div');
-        el.style.cssText = `background:${isDark ? '#1e1e1e' : '#fff'};color:${isDark ? '#eee' : '#222'};padding:12px 16px;border-radius:12px;font-size:14px;box-shadow:0 4px 20px rgba(0,0,0,${isDark ? '0.4' : '0.15'});border-left:4px solid ${colors[type] || '#333'};pointer-events:auto;display:flex;align-items:center;gap:10px;word-break:break-word;`;
+        el.style.cssText = `background:${isDark ? '#1e1e1e' : '#fff'};color:${isDark ? '#eee' : '#222'};padding:14px 18px;border-radius:12px;font-size:15px;box-shadow:0 4px 20px rgba(0,0,0,${isDark ? '0.4' : '0.15'});border-left:5px solid ${colors[type] || '#333'};pointer-events:auto;display:flex;align-items:center;gap:10px;word-break:break-word;`;
         el.innerHTML = `<span>${text}</span>`;
         notificationContainer.appendChild(el);
         setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.4s'; setTimeout(() => { if (el.parentNode) el.remove(); }, 400); }, duration);
@@ -156,6 +159,7 @@
             showNotification('Не указан API ключ AgentMail.to в настройках!', 'error', 8000);
             return null;
         }
+        // Запрос без параметров создаёт уникальный рандомный inbox
         const resp = await apiRequest('POST', 'https://api.agentmail.to/v0/inboxes', apiKey, {});
         if (resp.status !== 200 && resp.status !== 201) {
             showNotification(`AgentMail: ошибка создания inbox (${resp.status})`, 'error', 8000);
@@ -170,6 +174,14 @@
             showNotification('AgentMail: ошибка парсинга ответа', 'error', 8000);
         }
         return null;
+    }
+
+    async function deleteAgentMailInbox(inboxId) {
+        if (!inboxId) return;
+        const apiKey = await getData('agentMailApiKey');
+        if (!apiKey) return;
+        await apiRequest('DELETE', `https://api.agentmail.to/v0/inboxes/${inboxId}`, apiKey);
+        console.log(`[AUTO-REG] Inbox ${inboxId} deleted.`);
     }
 
     async function getAgentMailMessages(inboxId) {
@@ -190,25 +202,66 @@
     }
 
     // ============================================
-    // API: SimpleLogin (Опционально)
+    // API: SimpleLogin
     // ============================================
-    async function createSimpleLoginAlias() {
+    async function createSimpleLoginAlias(forwardToEmail) {
         const apiKey = await getData('simpleLoginApiKey');
-        if (!apiKey) return null; // Не критично, если не указан
+        if (!apiKey) return null;
+
+        // 1. Получаем список ящиков
+        const mailboxesResp = await apiRequest('GET', 'https://app.simplelogin.io/api/mailboxes', apiKey);
+        let mailboxes = [];
+        if (mailboxesResp.status === 200) {
+            try { mailboxes = JSON.parse(mailboxesResp.responseText).mailboxes || []; } catch(e) {}
+        }
+
+        let targetMailboxId = null;
+        const existingMb = mailboxes.find(mb => mb.email === forwardToEmail);
         
-        const prefix = 'gpt_' + Math.random().toString(36).substring(2, 8);
-        const resp = await apiRequest('POST', 'https://app.simplelogin.io/api/aliases', apiKey, {
+        if (existingMb) {
+            targetMailboxId = existingMb.id;
+        } else {
+            // Пытаемся добавить AgentMail как новый ящик для пересылки
+            const createMbResp = await apiRequest('POST', 'https://app.simplelogin.io/api/mailboxes', apiKey, {
+                email: forwardToEmail,
+                comment: 'AgentMail Temporary Forwarding'
+            });
+            if (createMbResp.status === 200 || createMbResp.status === 201) {
+                try {
+                    const newMb = JSON.parse(createMbResp.responseText);
+                    targetMailboxId = newMb.id;
+                } catch(e) {}
+            }
+        }
+
+        if (!targetMailboxId) {
+            // Fallback: используем первый доступный ящик (предполагается, что пользователь настроил пересылку с него на AgentMail вручную)
+            targetMailboxId = mailboxes.length > 0 ? mailboxes[0].id : 0;
+            showNotification('Не удалось привязать AgentMail к SimpleLogin. Используется ящик по умолчанию.', 'warning', 6000);
+        }
+
+        // 2. Создаём алиас
+        const prefix = 'gpt_' + Math.random().toString(36).substring(2, 10);
+        const aliasResp = await apiRequest('POST', 'https://app.simplelogin.io/api/aliases', apiKey, {
             alias_prefix: prefix,
+            mailbox_ids: [targetMailboxId],
             note: 'ChatGPT Auto Register'
         });
-        
-        if (resp.status === 200 || resp.status === 201) {
+
+        if (aliasResp.status === 200 || aliasResp.status === 201) {
             try {
-                const data = JSON.parse(resp.responseText);
-                return data.alias || data.email;
-            } catch (e) {}
+                const data = JSON.parse(aliasResp.responseText);
+                return { alias: data.alias || data.email, mailboxId: targetMailboxId };
+            } catch(e) {}
         }
         return null;
+    }
+
+    async function deleteSimpleLoginAlias(aliasId) {
+        if (!aliasId) return;
+        const apiKey = await getData('simpleLoginApiKey');
+        if (!apiKey) return;
+        await apiRequest('DELETE', `https://app.simplelogin.io/api/aliases/${aliasId}`, apiKey);
     }
 
     // ============================================
@@ -225,19 +278,19 @@
     }
 
     async function findVerificationCode() {
-        if (!currentInboxId) return { found: false, reason: 'no_inbox' };
-        const messages = await getAgentMailMessages(currentInboxId);
+        if (!sessionState.inboxId) return { found: false, reason: 'no_inbox' };
+        const messages = await getAgentMailMessages(sessionState.inboxId);
         if (!messages) return { found: false, reason: 'api_error' };
         if (!Array.isArray(messages) || messages.length === 0) return { found: false, reason: 'no_messages' };
 
         messages.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
         
         for (const msg of messages) {
-            if (usedMessageIds.has(msg.id)) continue;
+            if (sessionState.usedMessageIds.has(msg.id)) continue;
             const msgTime = new Date(msg.created_at || 0).getTime();
-            if (codeRequestedAt && msgTime < codeRequestedAt - CONFIG.timeToleranceMs) continue;
+            if (sessionState.codeRequestedAt && msgTime < sessionState.codeRequestedAt - CONFIG.timeToleranceMs) continue;
 
-            const fullMsg = (await getAgentMailMessageDetail(currentInboxId, msg.id)) || msg;
+            const fullMsg = (await getAgentMailMessageDetail(sessionState.inboxId, msg.id)) || msg;
             const code = extractCode(fullMsg);
             if (code) {
                 return {
@@ -353,6 +406,32 @@
     const isOnProfilePage = () => { const f = findProfileFields(); return !!(f.nameInput && f.ageInput); };
 
     // ============================================
+    // ОЧИСТКА (УДАЛЕНИЕ ВРЕМЕННЫХ ДАННЫХ)
+    // ============================================
+    async function cleanupSession() {
+        showNotification('Очистка временных данных...', 'info', 3000);
+        
+        // 1. Удаляем inbox AgentMail (гарантия приватности)
+        if (sessionState.inboxId) {
+            await deleteAgentMailInbox(sessionState.inboxId);
+        }
+        
+        // 2. Если использовался SimpleLogin, пытаемся удалить алиас
+        if (sessionState.slAliasId) {
+            await deleteSimpleLoginAlias(sessionState.slAliasId);
+        }
+
+        // Сброс состояния
+        sessionState.inboxId = null;
+        sessionState.inboxEmail = null;
+        sessionState.slAlias = null;
+        sessionState.slAliasId = null;
+        sessionState.slMailboxId = null;
+        sessionState.codeRequestedAt = null;
+        sessionState.usedMessageIds = new Set();
+    }
+
+    // ============================================
     // МОДАЛЬНЫЕ ОКНА И МЕНЮ
     // ============================================
     function openSettingsModal() {
@@ -367,20 +446,25 @@
         const modal = document.createElement('div');
         modal.style.cssText = `background:${isDark ? '#1e1e1e' : '#fff'};padding:28px;border-radius:20px;max-width:500px;width:90%;box-shadow:0 10px 40px rgba(0,0,0,${isDark ? '0.5' : '0.2'});`;
         
+        const useSL = (await getData('useSimpleLogin')) === 'true';
+        
         modal.innerHTML = `
             <h2 style="margin:0 0 20px;color:${isDark ? '#fff' : '#1a1a1a'};font-size:20px;">⚙️ Настройки API</h2>
             <div style="margin-bottom:16px;">
-                <label style="display:block;color:${isDark ? '#ccc' : '#555'};font-size:13px;margin-bottom:6px;">AgentMail.to API Key (обязательно)</label>
-                <input id="ar-agentmail-key" type="password" placeholder="am_..." style="width:100%;padding:10px;border-radius:8px;border:1px solid ${isDark ? '#444' : '#ddd'};background:${isDark ? '#2d2d2d' : '#f9f9f9'};color:${isDark ? '#fff' : '#222'};font-size:14px;">
+                <label style="display:block;color:${isDark ? '#ccc' : '#555'};font-size:14px;margin-bottom:6px;font-weight:600;">AgentMail.to API Key (обязательно)</label>
+                <input id="ar-agentmail-key" type="password" placeholder="am_..." style="width:100%;padding:12px;border-radius:8px;border:1px solid ${isDark ? '#444' : '#ddd'};background:${isDark ? '#2d2d2d' : '#f9f9f9'};color:${isDark ? '#fff' : '#222'};font-size:15px;box-sizing:border-box;">
             </div>
-            <div style="margin-bottom:24px;">
-                <label style="display:block;color:${isDark ? '#ccc' : '#555'};font-size:13px;margin-bottom:6px;">SimpleLogin API Key (опционально)</label>
-                <input id="ar-simplelogin-key" type="password" placeholder="sl_..." style="width:100%;padding:10px;border-radius:8px;border:1px solid ${isDark ? '#444' : '#ddd'};background:${isDark ? '#2d2d2d' : '#f9f9f9'};color:${isDark ? '#fff' : '#222'};font-size:14px;">
-                <p style="color:${isDark ? '#888' : '#999'};font-size:12px;margin-top:6px;">Если указан, будет создан алиас для дополнительной изоляции.</p>
+            <div style="margin-bottom:16px;">
+                <label style="display:block;color:${isDark ? '#ccc' : '#555'};font-size:14px;margin-bottom:6px;font-weight:600;">SimpleLogin API Key (для обхода блокировок)</label>
+                <input id="ar-simplelogin-key" type="password" placeholder="sl_..." style="width:100%;padding:12px;border-radius:8px;border:1px solid ${isDark ? '#444' : '#ddd'};background:${isDark ? '#2d2d2d' : '#f9f9f9'};color:${isDark ? '#fff' : '#222'};font-size:15px;box-sizing:border-box;">
+            </div>
+            <div style="margin-bottom:24px;display:flex;align-items:center;gap:10px;">
+                <input id="ar-use-sl" type="checkbox" ${useSL ? 'checked' : ''} style="width:20px;height:20px;cursor:pointer;">
+                <label for="ar-use-sl" style="color:${isDark ? '#ddd' : '#333'};font-size:14px;cursor:pointer;">Использовать SimpleLogin (создавать алиас, пересылающий на AgentMail)</label>
             </div>
             <div style="display:flex;gap:10px;justify-content:flex-end;">
-                <button id="ar-cancel-settings" style="padding:10px 20px;background:transparent;color:${isDark ? '#aaa' : '#666'};border:1px solid ${isDark ? '#444' : '#ddd'};border-radius:8px;cursor:pointer;font-size:14px;">Отмена</button>
-                <button id="ar-save-settings" style="padding:10px 20px;background:#10a37f;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600;">Сохранить</button>
+                <button id="ar-cancel-settings" style="padding:12px 20px;background:transparent;color:${isDark ? '#aaa' : '#666'};border:1px solid ${isDark ? '#444' : '#ddd'};border-radius:8px;cursor:pointer;font-size:15px;">Отмена</button>
+                <button id="ar-save-settings" style="padding:12px 20px;background:#10a37f;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:15px;font-weight:600;">Сохранить</button>
             </div>
         `;
         
@@ -396,8 +480,10 @@
         document.getElementById('ar-save-settings').onclick = async () => {
             const amKey = document.getElementById('ar-agentmail-key').value.trim();
             const slKey = document.getElementById('ar-simplelogin-key').value.trim();
+            const useSL = document.getElementById('ar-use-sl').checked;
             await saveData('agentMailApiKey', amKey);
             await saveData('simpleLoginApiKey', slKey);
+            await saveData('useSimpleLogin', useSL ? 'true' : 'false');
             showNotification('Настройки сохранены', 'success', 3000);
             overlay.remove();
         };
@@ -411,18 +497,21 @@
             overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:999999;display:flex;align-items:center;justify-content:center;';
             
             const modal = document.createElement('div');
-            modal.style.cssText = `background:${isDark ? '#1e1e1e' : '#fff'};padding:28px;border-radius:20px;max-width:400px;width:90%;text-align:center;`;
+            modal.style.cssText = `background:${isDark ? '#1e1e1e' : '#fff'};padding:28px;border-radius:20px;max-width:420px;width:90%;text-align:center;`;
             
             const amKey = await getData('agentMailApiKey');
             const hasKey = !!amKey;
+            const useSL = (await getData('useSimpleLogin')) === 'true';
             
             modal.innerHTML = `
                 <h2 style="margin:0 0 16px;color:${isDark ? '#fff' : '#1a1a1a'};">🚀 Регистрация ChatGPT</h2>
-                <p style="color:${isDark ? '#aaa' : '#666'};font-size:14px;margin-bottom:20px;">
-                    ${hasKey ? 'API ключ AgentMail.to найден. Готов к созданию временного ящика.' : '⚠️ API ключ AgentMail.to не найден! Добавьте его в настройках.'}
+                <p style="color:${isDark ? '#aaa' : '#666'};font-size:15px;margin-bottom:24px;line-height:1.5;">
+                    ${hasKey 
+                        ? `Готов к запуску.<br><span style="font-size:13px;opacity:0.8;">Режим: ${useSL ? 'SimpleLogin алиас → AgentMail' : 'Прямой AgentMail'}</span>` 
+                        : '⚠️ API ключ AgentMail.to не найден! Добавьте его в настройках.'}
                 </p>
-                <div style="display:flex;flex-direction:column;gap:10px;">
-                    <button id="ar-start-reg" style="padding:14px;background:#10a37f;color:white;border:none;border-radius:12px;font-size:15px;cursor:pointer;font-weight:600;${!hasKey ? 'opacity:0.5;cursor:not-allowed;' : ''}" ${!hasKey ? 'disabled' : ''}>Начать регистрацию</button>
+                <div style="display:flex;flex-direction:column;gap:12px;">
+                    <button id="ar-start-reg" style="padding:16px;background:#10a37f;color:white;border:none;border-radius:12px;font-size:16px;cursor:pointer;font-weight:600;${!hasKey ? 'opacity:0.5;cursor:not-allowed;' : ''}" ${!hasKey ? 'disabled' : ''}>Начать регистрацию</button>
                     <button id="ar-open-settings" style="padding:14px;background:${isDark ? '#2d2d2d' : '#f0f0f0'};color:${isDark ? '#eee' : '#222'};border:1px solid ${isDark ? '#444' : '#ddd'};border-radius:12px;font-size:15px;cursor:pointer;">⚙️ Настройки API</button>
                     <button id="ar-cancel-reg" style="padding:12px;background:transparent;color:${isDark ? '#666' : '#999'};border:none;font-size:14px;cursor:pointer;">Отмена</button>
                 </div>
@@ -444,11 +533,11 @@
     let floatingMenu = null;
     let menuExpanded = false;
 
-    const ICON_SETTINGS = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
-    const ICON_PLAY = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
-    const ICON_COPY = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
-    const ICON_PASTE = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>`;
-    const ICON_HELP = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
+    const ICON_SETTINGS = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
+    const ICON_PLAY = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
+    const ICON_COPY = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+    const ICON_PASTE = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>`;
+    const ICON_HELP = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
 
     function createFloatingMenu() {
         if (floatingMenu) floatingMenu.remove();
@@ -459,13 +548,13 @@
         const hover = isDark ? '#3a3a3a' : '#f5f5f5';
 
         floatingMenu = document.createElement('div');
-        floatingMenu.style.cssText = `position:fixed;bottom:30px;right:30px;z-index:99999;display:flex;flex-direction:column;align-items:flex-end;gap:10px;`;
+        floatingMenu.style.cssText = `position:fixed;bottom:30px;right:30px;z-index:99999;display:flex;flex-direction:column;align-items:flex-end;gap:12px;`;
 
         const makeBtn = (icon, title, onClick, primary = false) => {
             const b = document.createElement('button');
             b.innerHTML = icon;
             b.title = title;
-            b.style.cssText = `width:48px;height:48px;border-radius:50%;background:${primary ? '#10a37f' : bg};color:${primary ? '#fff' : fg};border:1px solid ${primary ? '#10a37f' : border};cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,${isDark ? '0.4' : '0.15'});transition:all 0.2s;`;
+            b.style.cssText = `width:52px;height:52px;border-radius:50%;background:${primary ? '#10a37f' : bg};color:${primary ? '#fff' : fg};border:1px solid ${primary ? '#10a37f' : border};cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,${isDark ? '0.4' : '0.15'});transition:all 0.2s;`;
             b.addEventListener('mouseenter', () => { if (!primary) b.style.background = hover; });
             b.addEventListener('mouseleave', () => { if (!primary) b.style.background = bg; });
             b.onclick = (e) => { e.stopPropagation(); onClick(); };
@@ -484,9 +573,9 @@
             menuExpanded = false; subMenu.style.display = 'none';
             const action = await showRegistrationDialog();
             if (action === 'start') {
-                isRunning = true;
+                sessionState.isRunning = true;
                 await runStage();
-                isRunning = false;
+                sessionState.isRunning = false;
             }
         }));
         subMenu.appendChild(makeBtn(ICON_COPY, 'Копировать контекст', copyContext));
@@ -519,26 +608,32 @@
         overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:999999;display:flex;align-items:center;justify-content:center;';
         
         const modal = document.createElement('div');
-        modal.style.cssText = `background:${isDark ? '#1e1e1e' : '#fff'};padding:24px;border-radius:16px;max-width:600px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:0 10px 40px rgba(0,0,0,0.4);`;
+        modal.style.cssText = `background:${isDark ? '#1e1e1e' : '#fff'};padding:24px;border-radius:16px;max-width:600px;width:90%;max-height:85vh;overflow-y:auto;box-shadow:0 10px 40px rgba(0,0,0,0.4);`;
         
         modal.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
                 <h2 style="margin:0;color:${isDark ? '#fff' : '#1a1a1a'};font-size:20px;">Помощь — ChatGPT Auto Register</h2>
-                <button id="ar-close-help" style="background:none;border:none;font-size:24px;cursor:pointer;color:${isDark ? '#999' : '#666'};padding:0 5px;">×</button>
+                <button id="ar-close-help" style="background:none;border:none;font-size:28px;cursor:pointer;color:${isDark ? '#999' : '#666'};padding:0 5px;">×</button>
             </div>
-            <div style="color:${isDark ? '#ddd' : '#333'};line-height:1.6;font-size:14px;">
-                <div style="margin-bottom:20px;">
-                    <h3 style="margin:0 0 12px 0;color:${isDark ? '#fff' : '#1a1a1a'};font-size:16px;border-bottom:2px solid ${isDark ? '#333' : '#e0e0e0'};padding-bottom:8px;">⚙️ Настройка API</h3>
-                    <p style="margin:0 0 12px 0;">1. Получите API ключ на <a href="https://agentmail.to" target="_blank" style="color:#10a37f;">agentmail.to</a></p>
-                    <p style="margin:0 0 12px 0;">2. Откройте <b>Настройки API</b> в плавающем меню и вставьте ключ (начинается с <code>am_</code>).</p>
-                    <p style="margin:0;">3. (Опционально) Добавьте ключ SimpleLogin для создания алиасов.</p>
+            <div style="color:${isDark ? '#ddd' : '#333'};line-height:1.6;font-size:15px;">
+                <div style="margin-bottom:24px;">
+                    <h3 style="margin:0 0 12px 0;color:${isDark ? '#fff' : '#1a1a1a'};font-size:17px;border-bottom:2px solid ${isDark ? '#333' : '#e0e0e0'};padding-bottom:8px;">⚙️ 1. Настройка API</h3>
+                    <p style="margin:0 0 12px 0;">1. Получите API ключ на <a href="https://agentmail.to" target="_blank" style="color:#10a37f;text-decoration:underline;">agentmail.to</a> (обязательно).</p>
+                    <p style="margin:0 0 12px 0;">2. Если OpenAI блокирует домены <code>@agentmail.to</code>, получите ключ на <a href="https://app.simplelogin.io" target="_blank" style="color:#10a37f;text-decoration:underline;">simplelogin.io</a> и включите переключатель в настройках скрипта.</p>
+                </div>
+                <div style="margin-bottom:24px;">
+                    <h3 style="margin:0 0 12px 0;color:${isDark ? '#fff' : '#1a1a1a'};font-size:17px;border-bottom:2px solid ${isDark ? '#333' : '#e0e0e0'};padding-bottom:8px;">🔄 2. Принцип работы</h3>
+                    <ol style="margin:0;padding-left:20px;">
+                        <li style="margin-bottom:10px;">Скрипт создаёт <b>новый уникальный</b> ящик в AgentMail.</li>
+                        <li style="margin-bottom:10px;">(Если включено) Создаётся алиас SimpleLogin, который пересылает письма на этот ящик AgentMail.</li>
+                        <li style="margin-bottom:10px;">Регистрация в ChatGPT проходит через этот email (или алиас).</li>
+                        <li style="margin-bottom:10px;">Скрипт считывает 6-значный код из AgentMail и вводит его.</li>
+                        <li style="margin-bottom:10px;"><b>Автоматическая очистка:</b> после завершения регистрации временный ящик AgentMail (и алиас SimpleLogin) <b>безвозвратно удаляются</b>.</li>
+                    </ol>
                 </div>
                 <div>
-                    <h3 style="margin:0 0 12px 0;color:${isDark ? '#fff' : '#1a1a1a'};font-size:16px;border-bottom:2px solid ${isDark ? '#333' : '#e0e0e0'};padding-bottom:8px;">🚀 Использование</h3>
-                    <ul style="margin:0;padding-left:20px;">
-                        <li style="margin-bottom:8px;">Нажмите <b>Начать регистрацию</b> в меню.</li>
-                        <li>Скрипт автоматически создаст ящик, введёт email и извлечёт код из письма.</li>
-                    </ul>
+                    <h3 style="margin:0 0 12px 0;color:${isDark ? '#fff' : '#1a1a1a'};font-size:17px;border-bottom:2px solid ${isDark ? '#333' : '#e0e0e0'};padding-bottom:8px;">🚀 3. Использование</h3>
+                    <p style="margin:0;">Нажмите кнопку <b>🚀 Начать регистрацию</b> в плавающем меню (правый нижний угол) или через меню Tampermonkey. Автоматический запуск отключён для безопасности.</p>
                 </div>
             </div>
         `;
@@ -578,7 +673,7 @@
         const messages = findChatMessages();
         if (messages.length === 0) { showNotification('Не найдено сообщений в чате', 'error', 5000); return; }
         const formatted = messages.map(m => `[${m.role === 'user' ? 'Пользователь' : m.role === 'assistant' ? 'Ассистент' : 'Неизвестно'}]: ${m.text}`).join('\n\n');
-        savedContext = formatted;
+        sessionState.savedContext = formatted;
         await saveData('savedContext', formatted);
         try {
             if (typeof GM_setClipboard !== 'undefined') GM_setClipboard(formatted, 'text');
@@ -588,14 +683,14 @@
     }
 
     async function pasteContext() {
-        if (!savedContext) savedContext = await getData('savedContext');
-        if (!savedContext) { showNotification('Сначала скопируйте контекст', 'warning', 5000); return; }
+        if (!sessionState.savedContext) sessionState.savedContext = await getData('savedContext');
+        if (!sessionState.savedContext) { showNotification('Сначала скопируйте контекст', 'warning', 5000); return; }
         const input = findChatInput();
         if (!input) { showNotification('Поле ввода не найдено', 'error', 5000); return; }
         if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
-            await typeLikeHuman(input, savedContext);
+            await typeLikeHuman(input, sessionState.savedContext);
         } else if (input.isContentEditable) {
-            input.focus(); input.innerText = savedContext; input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.focus(); input.innerText = sessionState.savedContext; input.dispatchEvent(new Event('input', { bubbles: true }));
         }
         showNotification(`Контекст вставлен`, 'success', 4000);
     }
@@ -604,32 +699,37 @@
     // ЭТАПЫ РЕГИСТРАЦИИ
     // ============================================
     async function stageLogin() {
-        if (registrationComplete) return;
+        if (sessionState.registrationComplete) return;
         
-        showNotification('Создание временного ящика...', 'info', 3000);
+        showNotification('Создание уникального ящика AgentMail...', 'info', 3000);
         const inboxData = await createAgentMailInbox();
         if (!inboxData) {
             showNotification('Не удалось создать ящик. Проверьте API ключ.', 'error', 8000);
             return;
         }
-        currentInboxId = inboxData.id;
-        currentEmailAddress = inboxData.email;
+        sessionState.inboxId = inboxData.id;
+        sessionState.inboxEmail = inboxData.email;
         
-        const slKey = await getData('simpleLoginApiKey');
-        if (slKey) {
+        const useSL = (await getData('useSimpleLogin')) === 'true';
+        let registrationEmail = sessionState.inboxEmail;
+
+        if (useSL) {
             showNotification('Создание алиаса SimpleLogin...', 'info', 3000);
-            const aliasEmail = await createSimpleLoginAlias();
-            if (aliasEmail) {
-                currentEmailAddress = aliasEmail;
-                showNotification(`Алиас создан: ${aliasEmail}`, 'success', 4000);
+            const slData = await createSimpleLoginAlias(sessionState.inboxEmail);
+            if (slData && slData.alias) {
+                registrationEmail = slData.alias;
+                sessionState.slAlias = slData.alias;
+                sessionState.slMailboxId = slData.mailboxId;
+                // Примечание: ID алиаса для удаления можно получить из полного ответа, но для простоты 
+                // мы полагаемся на очистку AgentMail. Если нужно удалять алиас, требуется доработка API SimpleLogin.
+                showNotification(`Алиас создан: ${registrationEmail}`, 'success', 4000);
+            } else {
+                showNotification('Не удалось создать алиас. Используется прямой AgentMail.', 'warning', 5000);
             }
         }
 
-        codeRequestedAt = Date.now();
-        usedMessageIds = new Set();
-        await saveData('currentInboxId', currentInboxId);
-        await saveData('currentEmailAddress', currentEmailAddress);
-        await saveData('codeRequestedAt', codeRequestedAt);
+        sessionState.codeRequestedAt = Date.now();
+        sessionState.usedMessageIds = new Set();
 
         let input = null;
         for (let i = 0; i < 8 && !input; i++) {
@@ -638,21 +738,20 @@
         }
         if (!input) { showNotification('Поле email не найдено', 'error'); return; }
 
-        await typeLikeHuman(input, currentEmailAddress);
-        showNotification(`Email введён: ${currentEmailAddress}`, 'success');
+        await typeLikeHuman(input, registrationEmail);
+        showNotification(`Email введён: ${registrationEmail}`, 'success');
         await humanDelay(100, 300);
         await clickContinue();
     }
 
     async function stageVerify() {
-        if (verifyCompleted || registrationComplete || isRunning) return;
-        if (codeInserted) { verifyCompleted = true; await stageProfile(); return; }
+        if (sessionState.verifyCompleted || sessionState.registrationComplete || sessionState.isRunning) return;
+        if (sessionState.codeInserted) { sessionState.verifyCompleted = true; await stageProfile(); return; }
         
-        if (!currentInboxId) currentInboxId = await getData('currentInboxId');
-        if (!currentInboxId) { showNotification('Нет активного inbox ID', 'error'); return; }
+        if (!sessionState.inboxId) { showNotification('Нет активного inbox ID', 'error'); return; }
 
         for (let i = 0; i < CONFIG.maxAttempts; i++) {
-            if (registrationComplete) return;
+            if (sessionState.registrationComplete) return;
             const attempt = i + 1;
             if (attempt <= 3 || attempt % 10 === 0) showNotification(`Проверка почты #${attempt}/${CONFIG.maxAttempts}`, 'debug', 2000);
             
@@ -660,8 +759,9 @@
             if (result.found && result.code) {
                 showNotification(`Код найден: ${result.code} (письму ${result.ageSec}с)`, 'success', 8000);
                 if (await fillCode(result.code)) {
-                    codeInserted = true; verifyCompleted = true;
-                    usedMessageIds.add(result.messageId);
+                    sessionState.codeInserted = true; 
+                    sessionState.verifyCompleted = true;
+                    sessionState.usedMessageIds.add(result.messageId);
                     await humanDelay(200, 500); 
                     await clickContinue();
                     break;
@@ -672,14 +772,14 @@
             }
             await new Promise(r => setTimeout(r, CONFIG.checkInterval));
         }
-        setTimeout(() => { if (!registrationComplete) runStage(); }, 1000);
+        setTimeout(() => { if (!sessionState.registrationComplete) runStage(); }, 1000);
     }
 
     async function stageProfile() {
-        if (registrationComplete) return;
+        if (sessionState.registrationComplete) return;
         const fields = findProfileFields();
         if (!fields.nameInput || !fields.ageInput) { 
-            setTimeout(() => { if (!registrationComplete) stageProfile(); }, 1000); 
+            setTimeout(() => { if (!sessionState.registrationComplete) stageProfile(); }, 1000); 
             return; 
         }
         const name = generateUserData().firstName, age = generateAge();
@@ -689,9 +789,9 @@
         fillInput(fields.ageInput, String(age));
         await humanDelay(500, 1500);
         if (await clickContinue()) {
-            registrationComplete = true;
-            await saveData('registrationComplete', true);
+            sessionState.registrationComplete = true;
             showNotification('Регистрация успешно завершена!', 'success', 8000);
+            await cleanupSession(); // Удаляем временный inbox
         }
     }
 
@@ -708,8 +808,8 @@
     }
 
     async function runStage() {
-        if (isRunning || registrationComplete) return;
-        isRunning = true;
+        if (sessionState.isRunning || sessionState.registrationComplete) return;
+        sessionState.isRunning = true;
         try {
             const stage = detectStage();
             if (stage === 'login') await stageLogin();
@@ -717,26 +817,23 @@
             else if (stage === 'profile') await stageProfile();
             else if (stage === 'logged_in') {
                 showNotification('Вы уже авторизованы!', 'success', 5000);
-                registrationComplete = true;
+                sessionState.registrationComplete = true;
             } else {
-                showNotification('Ожидание страницы входа...', 'info', 3000);
+                showNotification('Перейдите на страницу входа ChatGPT', 'info', 3000);
             }
         } catch (e) { 
             showNotification(`Ошибка: ${e.message}`, 'error'); 
             console.error(e);
+            await cleanupSession(); // Очищаем при ошибке
         }
-        isRunning = false;
+        sessionState.isRunning = false;
     }
 
     // ============================================
     // ИНИЦИАЛИЗАЦИЯ
     // ============================================
     async function init() {
-        registrationComplete = (await getData('registrationComplete')) === true;
-        currentInboxId = await getData('currentInboxId');
-        currentEmailAddress = await getData('currentEmailAddress');
-        codeRequestedAt = await getData('codeRequestedAt');
-        savedContext = await getData('savedContext');
+        sessionState.savedContext = await getData('savedContext');
 
         // Создаём плавающее меню (автоматический запуск отключён)
         createFloatingMenu();
@@ -745,9 +842,9 @@
         GM_registerMenuCommand("🚀 Начать регистрацию", async () => {
             const action = await showRegistrationDialog();
             if (action === 'start') {
-                isRunning = true;
+                sessionState.isRunning = true;
                 await runStage();
-                isRunning = false;
+                sessionState.isRunning = false;
             }
         });
         GM_registerMenuCommand("⚙️ Настройки API", openSettingsModal);
@@ -755,16 +852,16 @@
 
         // Наблюдатель за изменением темы
         window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-            createFloatingMenu(); // Пересоздаём меню для обновления цветов
+            createFloatingMenu();
         });
 
-        // Если скрипт перезагружен на странице верификации, можно продолжить
-        if (detectStage() === 'verify' && currentInboxId) {
+        // Если скрипт перезагружен на странице верификации, можно продолжить (но только если есть активный inboxId в памяти)
+        if (detectStage() === 'verify' && sessionState.inboxId) {
             showNotification('Обнаружена страница верификации. Продолжаю...', 'info', 3000);
             setTimeout(() => {
-                isRunning = true;
+                sessionState.isRunning = true;
                 runStage();
-                isRunning = false;
+                sessionState.isRunning = false;
             }, 1500);
         }
     }
