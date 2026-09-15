@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      77.0
-// @description  Авторегистрация ChatGPT через AgentMail.to / SimpleLogin + расширенная диагностика
+// @version      78.0
+// @description  Авторегистрация ChatGPT через AgentMail.to / SimpleLogin + диагностика
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://auth.openai.com/*
@@ -18,7 +18,6 @@
 (function () {
 'use strict';
 
-// ═══════════════════ КОНФИГ ═══════════════════
 const C = {
     amKey: '', amBase: 'https://api.agentmail.to/v0',
     slKey: '', slBase: 'https://app.simplelogin.io',
@@ -28,7 +27,6 @@ const C = {
     debug: false,
 };
 
-// ═══════════════════ СОСТОЯНИЕ ═══════════════════
 let codeDone = false, profileDone = false, regDone = false,
     running = false, loginTried = false, verifyDone = false,
     pwdDone = false, inited = false, inbox = null, polling = false,
@@ -88,8 +86,10 @@ async function buildReport() {
     const p = [];
     p.push('═══ CHATGPT AUTO REGISTER — ОТЧЁТ ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия скрипта: 77.0');
+    p.push('Версия скрипта: 78.0');
     p.push('URL: ' + location.href);
+    p.push('Host: ' + location.hostname);
+    p.push('Path: ' + location.pathname);
     p.push('User Agent: ' + navigator.userAgent);
     p.push('Платформа: ' + navigator.platform + ' | Mobile: ' + (innerWidth < 768));
     p.push('Окно: ' + innerWidth + '×' + innerHeight);
@@ -129,9 +129,6 @@ async function buildReport() {
     p.push('debug: ' + C.debug);
     p.push('fast: ' + C.fast);
     p.push('shift: ' + C.shift);
-    p.push('interval: ' + C.interval);
-    p.push('maxTries: ' + C.maxTries);
-    p.push('tolMs: ' + C.tolMs);
     p.push('amKey: ' + (C.amKey ? C.amKey.slice(0, 8) + '…(' + C.amKey.length + ')' : 'нет'));
     p.push('slKey: ' + (C.slKey ? C.slKey.slice(0, 8) + '…(' + C.slKey.length + ')' : 'нет'));
     p.push('');
@@ -141,6 +138,7 @@ async function buildReport() {
     p.push('findCodeInp(): ' + (findCodeInp() ? 'есть' : 'нет'));
     const codes = findCodes();
     p.push('findCodes(): ' + (codes ? (codes.type === 'otp' ? 'OTP (' + codes.inputs.length + ' полей)' : 'single') : 'нет'));
+    p.push('hasVerifyText(): ' + hasVerifyText());
     const prof = findProfile();
     p.push('findProfile().name: ' + (prof.name ? 'есть' : 'нет'));
     p.push('findProfile().age: ' + (prof.age ? 'есть' : 'нет'));
@@ -148,13 +146,14 @@ async function buildReport() {
     p.push('hasLoginBtn: ' + hasLoginBtn());
     p.push('loggedIn: ' + loggedIn());
     p.push('menuBtn.left: ' + (menuBtn ? menuBtn.style.left : 'нет'));
+    p.push('account: ' + currentAccountId());
     p.push('');
     p.push('─── ОШИБКИ (' + diagErrors.length + ') ───');
     if (!diagErrors.length) p.push('(нет)');
     else diagErrors.slice(-20).forEach(e => p.push(e));
     p.push('');
     p.push('─── ЛОГ (' + logBuf.length + ') ───');
-    if (!logBuf.length) p.push('(пусто — включите диагностику)');
+    if (!logBuf.length) p.push('(пусто)');
     else logBuf.slice(-200).forEach(l => p.push(l));
     p.push('');
     p.push('═══ КОНЕЦ ОТЧЁТА ═══');
@@ -183,8 +182,8 @@ function showReportModal(report, copied) {
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
 <h2 style="margin:0;font-size:17px;font-weight:600">Отчёт диагностики</h2>
 <button id="grmc" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--gmut);padding:0 5px">×</button></div>
-<p style="margin:0 0 10px 0;font-size:12px;color:var(--gmut)">${copied ? '✓ Скопировано в буфер.' : '⚠ Буфер недоступен. Выделите текст вручную.'}</p>
-<textarea id="grmt" readonly style="flex:1;min-height:400px;width:100%;padding:12px;border-radius:10px;border:1px solid var(--gbd);background:var(--gelev);color:var(--gfg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.4;resize:vertical;box-sizing:border-box">${report.replace(/</g, '&lt;')}</textarea>
+<p style="margin:0 0 10px 0;font-size:12px;color:var(--gmut)">${copied ? '✓ Скопировано в буфер.' : '⚠ Буфер недоступен.'}</p>
+<textarea id="grmt" readonly style="flex:1;min-height:400px;width:100%;padding:12px;border-radius:10px;border:1px solid var(--gbd);background:var(--gelev);color:var(--gfg);font-family:ui-monospace,monospace;font-size:11px;line-height:1.4;resize:vertical;box-sizing:border-box">${report.replace(/</g, '&lt;')}</textarea>
 <div style="display:flex;gap:10px;margin-top:12px">
 <button id="grmc2" style="flex:1;padding:12px;background:var(--gacc);color:var(--gaccf);border:none;border-radius:999px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit">Скопировать снова</button>
 <button id="grmclr" style="padding:12px 20px;background:transparent;color:var(--gdngr);border:1px solid var(--gbd);border-radius:999px;font-size:14px;cursor:pointer;font-family:inherit">Очистить логи</button>
@@ -198,7 +197,7 @@ function showReportModal(report, copied) {
             if (typeof GM_setClipboard !== 'undefined') GM_setClipboard(report, 'text');
             else { txt.focus(); txt.select(); document.execCommand('copy'); }
             notify('Скопировано', 'ok', 2000);
-        } catch { notify('Не удалось скопировать', 'err', 3000); }
+        } catch { notify('Не удалось', 'err', 3000); }
     };
     m.querySelector('#grmc').onclick = () => ov.remove();
     m.querySelector('#grmc2').onclick = copyAgain;
@@ -635,13 +634,16 @@ function findEmail() {
 const findPwd = () => [...document.querySelectorAll('input[type="password"]')].find(el => el.offsetParent !== null) || null;
 
 function findCodeInp() {
-    for (const s of ['input[placeholder*="код" i]', 'input[placeholder*="code" i]',
+    // Расширенный поиск: учитываем форму _r_5_-code и name="code"
+    for (const s of ['input[id*="-code"]', 'input[name="code"]',
+                     'input[placeholder*="код" i]', 'input[placeholder*="code" i]',
                      'input[inputmode="numeric"]', 'input[autocomplete="one-time-code"]']) {
         const el = document.querySelector(s);
         if (el && el.offsetParent !== null) return el;
     }
     for (const el of document.querySelectorAll('input[type="text"],input[type="tel"],input:not([type])')) {
-        if (+(el.getAttribute('maxlength') || 0) === 6) return el;
+        const max = +(el.getAttribute('maxlength') || 0);
+        if (max === 6 || max === 0) return el;
     }
     return null;
 }
@@ -655,8 +657,8 @@ async function fillCode(code) {
     verifyStats.fillAttempts++;
     const t = findCodes();
     if (!t) {
-        log('ERROR', 'fillCode', 'поле для кода НЕ найдено (findCodes → null)');
-        log('DEBUG', 'fillCode', 'inputs on page: ' + [...document.querySelectorAll('input')].map(i => ({
+        log('ERROR', 'fillCode', 'поле для кода НЕ найдено');
+        log('DEBUG', 'fillCode', 'inputs: ' + [...document.querySelectorAll('input')].map(i => ({
             id: i.id, name: i.name, type: i.type, max: i.getAttribute('maxlength'),
             placeholder: i.placeholder, visible: i.offsetParent !== null
         })).map(o => JSON.stringify(o)).join(' | '));
@@ -725,6 +727,11 @@ const hasLoginBtn = () => [...document.querySelectorAll('button,a,div[role="butt
 const onLogin = () => location.hostname.includes('auth.openai.com') || !!findEmail();
 const onProfile = () => { const f = findProfile(); return !!(f.name && f.age); };
 const onAboutYou = () => /about-you|profile|onboarding/i.test(location.href);
+
+function hasVerifyText() {
+    const body = document.body?.innerText || '';
+    return /Проверьте свою почту|Введите код подтверждения|Check your email|Enter the code|Enter verification/i.test(body);
+}
 
 function currentAccountId() {
     const el = document.querySelector('[data-testid="user-menu"]') ||
@@ -826,11 +833,15 @@ function setStatus(t, c) {
 function posMenu() {
     if (!menuBtn) return;
     const isMob = innerWidth < 768;
-    const left = isMob ? 52 : 56;
+    const host = location.hostname;
+    // auth.openai.com — нет сайдбара, ставим в левый угол
+    // chatgpt.com — справа от логотипа в сайдбаре
+    const left = host.includes('auth.openai.com') ? (isMob ? 8 : 12) : (isMob ? 52 : 56);
     if (menuBtn.style.left === left + 'px') return;
     menuBtn.style.left = left + 'px';
     if (menuPnl) menuPnl.style.left = left + 'px';
     if (statusLbl) statusLbl.style.left = left + 'px';
+    log('DEBUG', 'posMenu', 'left=' + left + ' host=' + host);
 }
 
 function setCanContinue(v) { canContinue = v; if (menuVis) updateMenu(); }
@@ -839,7 +850,6 @@ function updateMenu() {
     const li = loggedIn();
     const r = menuPnl.querySelector('#gr'), cc = menuPnl.querySelector('#gc'),
           cp = menuPnl.querySelector('#gcp'), ps = menuPnl.querySelector('#gps');
-    // Регистрация видна всегда, когда не авторизован (сброс regDone произойдёт при клике)
     if (r) r.style.display = !li ? 'flex' : 'none';
     if (cc) cc.style.display = canContinue ? 'flex' : 'none';
     if (cp) cp.style.display = li ? 'flex' : 'none';
@@ -932,6 +942,7 @@ function createMenu() {
     document.body.appendChild(menuPnl);
     document.body.appendChild(statusLbl);
 
+    posMenu();
     addEventListener('resize', posMenu);
     setInterval(posMenu, 3000);
 
@@ -948,8 +959,8 @@ function urlWatch(cb, timeout = 15000) {
     let el = 0;
     urlTimer = setInterval(() => {
         if (location.href !== last) { stopUrl(); log('INFO', 'urlWatch', last + ' → ' + location.href); cb(); }
-        else if ((el += 500) >= timeout) { stopUrl(); log('WARN', 'urlWatch', 'timeout ' + timeout + 'ms'); cb(true); }
-    }, 500);
+        else if ((el += 300) >= timeout) { stopUrl(); log('WARN', 'urlWatch', 'timeout ' + timeout + 'ms'); cb(true); }
+    }, 300);
 }
 function stopUrl() { if (urlTimer) { clearInterval(urlTimer); urlTimer = null; } }
 
@@ -1062,7 +1073,7 @@ async function watchCode() {
         await sleep(1500);
         if (regDone) { setCanContinue(false); log('INFO', 'watchCode', 'regDone'); return; }
         if (onProfile() || findPwd() || onAboutYou()) {
-            log('INFO', 'watchCode', 'next stage detected: profile=' + onProfile() + ' pwd=' + !!findPwd() + ' aboutYou=' + onAboutYou());
+            log('INFO', 'watchCode', 'next stage detected');
             setCanContinue(false); running = false; return runStage();
         }
         if (!findCodes()) {
@@ -1079,6 +1090,8 @@ async function watchCode() {
 
 async function stageVerify() {
     if (verifyDone || regDone || polling) return;
+    log('INFO', 'stageVerify', 'ENTER. host=' + location.hostname + ' path=' + location.pathname);
+    log('INFO', 'stageVerify', 'findCodes=' + (findCodes() ? 'yes' : 'no') + ' hasVerifyText=' + hasVerifyText());
     if (codeDone) { verifyDone = true; return stageProfile(); }
     polling = true;
     verifyStats.attempts = 0;
@@ -1172,12 +1185,20 @@ async function stageProfile() {
 }
 
 function detect() {
-    if (hasLoginBtn() && location.hostname.includes('chatgpt.com')) return 'main';
-    if (location.hostname.includes('auth.openai.com') || onAboutYou()) {
+    const host = location.hostname;
+    const path = location.pathname;
+
+    if (host.includes('auth.openai.com') || path.includes('email-verification')) {
+        if (onProfile()) return 'profile';
+        if (findCodes() || hasVerifyText()) return 'verify';
+        if (findPwd() && !findEmail()) return 'pwd';
+        if (findEmail()) return 'login';
+    }
+    if (hasLoginBtn() && host.includes('chatgpt.com')) return 'main';
+    if (onAboutYou()) {
         if (onProfile()) return 'profile';
         if (findCodes()) return 'verify';
         if (findPwd() && !findEmail()) return 'pwd';
-        if (findEmail()) return 'login';
     }
     return 'unknown';
 }
@@ -1186,7 +1207,7 @@ async function runStage() {
     if (running || regDone) return;
     running = true;
     const s = detect();
-    log('INFO', 'stage', '→ ' + s);
+    log('INFO', 'stage', '→ ' + s + ' (host=' + location.hostname + ')');
     try {
         if (s === 'main') await stageMain();
         else if (s === 'login') await stageLogin();
@@ -1206,7 +1227,6 @@ async function startReg() {
     if (running) { log('WARN', 'startReg', 'already running'); return; }
     if (loggedIn()) { log('WARN', 'startReg', 'user logged in'); return notify('Вы авторизованы. Выйдите.', 'warn', 6000); }
 
-    // ⚡ Принудительный сброс — новая регистрация всегда чистая
     if (regDone) {
         log('INFO', 'startReg', 'resetting regDone flag');
         regDone = false;
@@ -1257,27 +1277,27 @@ async function init() {
         ctx = await load('ctx');
         inbox = await load('inbox');
         if (inbox?.id) { verifyStats.inboxId = inbox.id; verifyStats.inboxEmail = inbox.email; }
-        log('INFO', 'init', 'loaded: mode=' + C.mode + ' debug=' + C.debug + ' amKey=' + (C.amKey ? 'yes' : 'no'));
+        log('INFO', 'init', 'loaded: mode=' + C.mode + ' debug=' + C.debug);
 
-        // ⚡ Обработка флага complete с учётом незавершённой сессии
         const comp = await load('complete');
         const pendingCode = await load('codeReqAt');
-        if (comp && loggedIn() && !pendingCode) {
+        const prevAcc = await load('account');
+        const currAcc = currentAccountId();
+        log('INFO', 'init', 'complete=' + comp + ' pendingCode=' + !!pendingCode + ' prevAcc=' + prevAcc + ' currAcc=' + currAcc);
+
+        if (comp && loggedIn() && prevAcc && prevAcc === currAcc && !pendingCode) {
             regDone = true;
             notifyDone = true;
-            log('INFO', 'init', 'regDone restored (completed, no pending)');
+            log('INFO', 'init', 'regDone restored');
         } else if (comp) {
             await save('complete', null);
             regDone = false;
             notifyDone = false;
-            log('INFO', 'init', 'regDone reset (comp=' + comp + ' loggedIn=' + loggedIn() + ' pendingCode=' + !!pendingCode + ')');
+            log('INFO', 'init', 'regDone reset (mismatch or pending)');
         }
 
-        // ⚡ Сброс при смене аккаунта
-        const prevAcc = await load('account');
-        const currAcc = currentAccountId();
         if (prevAcc && currAcc && prevAcc !== currAcc) {
-            log('INFO', 'init', 'account changed: ' + prevAcc + ' → ' + currAcc + ', resetting state');
+            log('INFO', 'init', 'account changed: ' + prevAcc + ' → ' + currAcc + ', resetting');
             await save('complete', null);
             await save('inbox', null);
             await save('email', null);
@@ -1298,6 +1318,11 @@ async function init() {
                 log('INFO', 'url', lastUrl + ' → ' + location.href);
                 lastUrl = location.href;
                 if (menuVis) updateMenu();
+                // ⚡ Автозапуск при смене URL, если регистрация уже идёт
+                if (!regDone && !running && (codeReqAt || inbox)) {
+                    log('INFO', 'url', 'auto-runStage on URL change');
+                    setTimeout(() => runStage(), 500);
+                }
             }
         }, 1000);
 
