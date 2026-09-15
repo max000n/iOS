@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Auto Register
 // @namespace    http://tampermonkey.net/
-// @version      80.0
-// @description  Авторегистрация ChatGPT через AgentMail.to / SimpleLogin + диагностика + авто-запуск verify
+// @version      81.0
+// @description  Авторегистрация ChatGPT через AgentMail.to / SimpleLogin + вкладки настроек + диагностика
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://auth.openai.com/*
@@ -21,7 +21,7 @@
 const C = {
     amKey: '', amBase: 'https://api.agentmail.to/v0',
     slKey: '', slBase: 'https://app.simplelogin.io',
-    slRelay: '',   // email постоянного ящика, привязанного в SimpleLogin
+    slRelay: '',
     mode: 'agentmail',
     interval: 3000, maxTries: 120, tolMs: 60000,
     fast: true, delInbox: true, retries: 3, shift: true,
@@ -33,7 +33,7 @@ let codeDone = false, profileDone = false, regDone = false,
     pwdDone = false, inited = false, inbox = null, polling = false,
     codeReqAt = null, usedIds = new Set(), urlTimer = null,
     helpModal = null, settingsModal = null, ctx = null,
-    notifyDone = false, canContinue = false;
+    notifyDone = false, canContinue = false, profileNotified = false;
 
 const verifyStats = {
     attempts: 0, lastReason: null, lastMsgCount: 0,
@@ -87,7 +87,7 @@ async function buildReport() {
     const p = [];
     p.push('═══ CHATGPT AUTO REGISTER — ОТЧЁТ ═══');
     p.push('Дата: ' + new Date().toISOString());
-    p.push('Версия скрипта: 80.0');
+    p.push('Версия скрипта: 81.0');
     p.push('URL: ' + location.href);
     p.push('Host: ' + location.hostname);
     p.push('Path: ' + location.pathname);
@@ -102,6 +102,7 @@ async function buildReport() {
     p.push('codeDone: ' + codeDone);
     p.push('pwdDone: ' + pwdDone);
     p.push('profileDone: ' + profileDone);
+    p.push('profileNotified: ' + profileNotified);
     p.push('polling: ' + polling);
     p.push('canContinue: ' + canContinue);
     p.push('notifyDone: ' + notifyDone);
@@ -232,7 +233,7 @@ color:var(--gfg);font-size:14px;box-sizing:border-box;font-family:inherit;transi
 .gpt-in:focus{outline:none;border-color:var(--gfg)}
 .gpt-lbl{display:block;margin-bottom:8px;color:var(--gfg);font-size:13px;font-weight:600}
 .gpt-hint{color:var(--gmut);font-size:12px;margin-top:6px;line-height:1.5}
-.gpt-seg{display:flex;background:var(--gelev);border-radius:12px;padding:3px;gap:2px;margin-bottom:18px}
+.gpt-seg{display:flex;background:var(--gelev);border-radius:12px;padding:3px;gap:2px}
 .gpt-seg button{flex:1;padding:10px;background:transparent;color:var(--gmut);border:none;border-radius:9px;
 cursor:pointer;font-size:13px;font-weight:500;font-family:inherit;transition:.18s var(--gease)}
 .gpt-seg button.active{background:var(--gbg);color:var(--gfg);box-shadow:0 1px 2px rgba(0,0,0,.08)}
@@ -359,7 +360,7 @@ function notify(text, type = 'info', dur = 5000) {
     }, dur);
 }
 
-// ═══════════════════ НАСТРОЙКИ ═══════════════════
+// ═══════════════════ НАСТРОЙКИ (со вкладками) ═══════════════════
 function openSettings() {
     return new Promise(res => {
         settingsModal?.remove();
@@ -367,14 +368,21 @@ function openSettings() {
         settingsModal.style.cssText = 'position:fixed;inset:0;background:var(--govl);z-index:999999;display:flex;align-items:center;justify-content:center;animation:gFd .2s var(--gease) both';
         const d = document.createElement('div');
         d.className = 'gpt-gl';
-        d.style.cssText = 'padding:24px;border-radius:20px;max-width:480px;width:90%;max-height:90vh;overflow-y:auto;color:var(--gfg);animation:gIn .3s var(--gease) both';
+        d.style.cssText = 'padding:24px;border-radius:20px;max-width:520px;width:92%;max-height:90vh;display:flex;flex-direction:column;color:var(--gfg);animation:gIn .3s var(--gease) both';
         d.innerHTML = `
-<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
 <h2 style="margin:0;font-size:18px;font-weight:600">Настройки</h2>
 <button id="gcs" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--gmut);padding:0 5px">×</button></div>
-<p style="color:var(--gmut);font-size:12px;margin:0 0 20px 0">Ключи сохраняются в Tampermonkey.</p>
+
+<div class="gpt-seg" id="gtabs" style="margin-bottom:18px">
+<button data-t="general" class="active">Общее</button>
+<button data-t="diag">Диагностика</button>
+</div>
+
+<div id="pane-general" style="overflow-y:auto;max-height:60vh;padding-right:4px">
+<p style="color:var(--gmut);font-size:12px;margin:0 0 16px 0">Ключи сохраняются в Tampermonkey.</p>
 <label class="gpt-lbl">Режим</label>
-<div class="gpt-seg" id="gm">
+<div class="gpt-seg" id="gm" style="margin-bottom:18px">
 <button data-m="agentmail">AgentMail</button>
 <button data-m="simplelogin">SimpleLogin</button></div>
 <div id="amBlock">
@@ -391,22 +399,48 @@ function openSettings() {
 <input id="slemail" class="gpt-in" type="email" placeholder="relay@agentmail.to" autocomplete="off">
 <p class="gpt-hint">Адрес постоянного inbox, привязанного в SimpleLogin → Mailboxes.<br>
 <span style="opacity:.8">Не удаляйте этот ящик — иначе алиасы SimpleLogin перестанут работать.</span></p></div>
-<div style="height:16px"></div>
-<div style="border-top:1px solid var(--gbd);padding-top:16px">
+</div>
+
+<div id="pane-diag" style="display:none;overflow-y:auto;max-height:60vh;padding-right:4px">
 <label class="gpt-lbl">Диагностика</label>
-<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:var(--gelev);border-radius:12px;margin-bottom:10px">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:var(--gelev);border-radius:12px;margin-bottom:12px">
 <span style="font-size:13px;color:var(--gfg)">Подробный лог</span>
 <span id="gsw" style="position:relative;width:38px;height:22px;background:${C.debug ? 'var(--gfg)' : '#8e8e8e'};border-radius:999px;flex-shrink:0;cursor:pointer;transition:background .2s var(--gease)">
 <span style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s var(--gease);box-shadow:0 1px 3px rgba(0,0,0,.3);transform:translateX(${C.debug ? '16px' : '0'})"></span></span></div>
-<button id="grepBtn" style="width:100%;padding:12px;background:var(--gelev);color:var(--gfg);border:1px solid var(--gbd);border-radius:999px;font-size:13px;cursor:pointer;font-family:inherit">Скопировать отчёт</button>
+<button id="grepBtn" style="width:100%;padding:12px;background:var(--gelev);color:var(--gfg);border:1px solid var(--gbd);border-radius:999px;font-size:13px;cursor:pointer;font-family:inherit;margin-bottom:12px">Скопировать отчёт</button>
+<p style="color:var(--gmut);font-size:12px;margin:0 0 8px 0">Текущее состояние:</p>
+<div style="background:var(--gelev);padding:10px 12px;border-radius:10px;font-family:ui-monospace,monospace;font-size:11px;color:var(--gmut);line-height:1.6;white-space:pre-wrap">stage: ${detect()}
+running: ${running}
+regDone: ${regDone}
+verifyDone: ${verifyDone}
+codeDone: ${codeDone}
+pwdDone: ${pwdDone}
+polling: ${polling}
+canContinue: ${canContinue}
+attempts: ${verifyStats.attempts}
+lastReason: ${verifyStats.lastReason || '—'}
+inbox: ${inbox?.email || '—'}
+codeReqAt: ${codeReqAt ? new Date(codeReqAt).toISOString() : '—'}</div>
+<p style="color:var(--gmut);font-size:11px;margin:12px 0 0 0">Логи также видны в консоли браузера (фильтр по <code>[cg]</code>).</p>
 </div>
-<div style="height:20px"></div>
+
+<div style="height:16px"></div>
 <div style="display:flex;flex-direction:column;gap:10px">
 <button id="gsave" class="gpt-btn">Сохранить</button>
 <button id="gclr" style="padding:10px;background:transparent;color:var(--gdngr);border:1px solid var(--gbd);border-radius:999px;font-size:13px;cursor:pointer;font-family:inherit">Удалить ключи</button>
 <button id="gcancel" class="gpt-ghost">Отмена</button></div>`;
         settingsModal.appendChild(d);
         document.body.appendChild(settingsModal);
+
+        // Вкладки
+        const tabsEl = d.querySelector('#gtabs'), tabBtns = tabsEl.querySelectorAll('button');
+        const paneGen = d.querySelector('#pane-general'), paneDiag = d.querySelector('#pane-diag');
+        tabBtns.forEach(b => b.onclick = () => {
+            const t = b.dataset.t;
+            tabBtns.forEach(x => x.classList.toggle('active', x.dataset.t === t));
+            paneGen.style.display = t === 'general' ? 'block' : 'none';
+            paneDiag.style.display = t === 'diag' ? 'block' : 'none';
+        });
 
         const am = d.querySelector('#amin'), sl = d.querySelector('#slin'),
               sle = d.querySelector('#slemail'),
@@ -796,7 +830,7 @@ function showHelp() {
 
 <div style="margin-bottom:22px">
 <h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">⚙️ Шаг 1. Настройка</h3>
-<p style="margin:0 0 10px 0;color:var(--gmut);font-size:13px">Откройте <b style="color:var(--gfg)">☰ → Настройки</b> и заполните:</p>
+<p style="margin:0 0 10px 0;color:var(--gmut);font-size:13px">Откройте <b style="color:var(--gfg)">☰ → Настройки → Общее</b> и заполните:</p>
 <p style="margin:0 0 6px 0"><b>Режим «AgentMail»</b> (по умолчанию):</p>
 <ul style="margin:0 0 12px 0;padding-left:20px;color:var(--gmut);font-size:13px">
 <li><b style="color:var(--gfg)">AgentMail API Key</b> — console.agentmail.to → API Keys → Create</li>
@@ -854,10 +888,12 @@ function showHelp() {
 <div style="margin-bottom:22px">
 <h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">🔧 Диагностика</h3>
 <p style="margin:0 0 8px 0;color:var(--gmut);font-size:13px">
-<b style="color:var(--gfg)">☰ → Настройки → Подробный лог</b> — включает расширенное логирование всех HTTP-запросов, шагов проверки почты, извлечения кода и заполнения полей.<br>
-<b style="color:var(--gfg)">☰ → Настройки → Скопировать отчёт</b> — собирает в один текст: версию скрипта, URL, состояние всех флагов, конфиг (ключи замаскированы), DOM-проверки и последние 200 строк лога. Отчёт вставляется в чат для разбора проблемы.
-</p>
-<p style="margin:0;color:var(--gmut);font-size:12px">Рекомендуется включать диагностику перед разбором любой проблемы с регистрацией.</p>
+<b style="color:var(--gfg)">☰ → Настройки → Диагностика</b> — вкладка с двумя функциями:</p>
+<ul style="margin:0 0 8px 0;padding-left:20px;color:var(--gmut);font-size:13px">
+<li><b style="color:var(--gfg)">Подробный лог</b> — включает расширенное логирование всех HTTP-запросов, шагов проверки почты, извлечения кода и заполнения полей.</li>
+<li><b style="color:var(--gfg)">Скопировать отчёт</b> — собирает в один текст: версию скрипта, URL, состояние всех флагов, конфиг (ключи замаскированы), DOM-проверки и последние 200 строк лога.</li>
+</ul>
+<p style="margin:0;color:var(--gmut);font-size:12px">Вкладка «Диагностика» также показывает live-состояние: текущий этап, флаги и последнюю причину отсутствия кода. Рекомендуется включать перед разбором проблемы.</p>
 </div>
 
 <div style="margin-bottom:22px">
@@ -872,7 +908,7 @@ function showHelp() {
 <div>
 <h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gfg)">🛠 Управление ключами</h3>
 <ul style="margin:0;padding-left:20px;color:var(--gmut);font-size:13px;line-height:1.7">
-<li><b style="color:var(--gfg)">Изменить</b> — ☰ → Настройки → ввести новые → Сохранить.</li>
+<li><b style="color:var(--gfg)">Изменить</b> — ☰ → Настройки → Общее → ввести новые → Сохранить.</li>
 <li><b style="color:var(--gfg)">Удалить</b> — ☰ → Настройки → «Удалить ключи».</li>
 <li><b style="color:var(--gfg)">Вручную</b> — Tampermonkey Dashboard → ChatGPT Auto Register → Storage.</li>
 </ul>
@@ -1065,7 +1101,6 @@ async function stageLogin() {
     if (choice === 'new') {
         setStatus('Почта…');
         if (C.mode === 'simplelogin') {
-            // ⚡ Используем email ящика, привязанного в SimpleLogin
             if (!C.slRelay) {
                 notify('Не указан AgentMail email для SimpleLogin. Откройте Настройки.', 'err', 10000);
                 return setStatus('');
@@ -1086,7 +1121,6 @@ async function stageLogin() {
             email = alias;
             notify(`Алиас: ${alias} → ${inbox.email}`, 'info', 6000);
         } else {
-            // ⚡ Обработка лимита ящиков
             let ib = await createInbox();
             if (!ib) {
                 const list = await listInboxes();
@@ -1263,7 +1297,12 @@ async function stageProfile() {
     const f = findProfile();
     if (!f.name || !f.age) return setTimeout(() => { if (!profileDone && !regDone) stageProfile(); }, 1000);
     const n = genName(), a = genAge();
-    notify(`Имя: ${n}, Возраст: ${a}`, 'info');
+    if (!profileNotified) {
+        profileNotified = true;
+        notify(`Имя: ${n}, Возраст: ${a}`, 'info');
+    } else {
+        log('DEBUG', 'stageProfile', 'duplicate call suppressed, filling again with ' + n + '/' + a);
+    }
     await typeHuman(f.name, n);
     await delay(200, 500);
     fill(f.age, String(a));
@@ -1344,7 +1383,7 @@ async function startReg() {
 
     setStatus('Старт');
     loginTried = false; verifyDone = false; codeDone = false; pwdDone = false;
-    notifyDone = false; setCanContinue(false);
+    notifyDone = false; profileNotified = false; setCanContinue(false);
     verifyStats.attempts = 0;
     verifyStats.lastReason = null;
     verifyStats.lastCode = null;
@@ -1419,7 +1458,6 @@ async function init() {
         createMenu();
         log('INFO', 'init', 'menu created at left=' + menuBtn.style.left);
 
-        // ⚡ АВТО-ЗАПУСК: verify/pwd/profile без клика
         setTimeout(async () => {
             const stage = detect();
             log('INFO', 'init', 'auto-check stage=' + stage + ' running=' + running + ' regDone=' + regDone + ' codeReqAt=' + (codeReqAt ? 'yes' : 'no'));
