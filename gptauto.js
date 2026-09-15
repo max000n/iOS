@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Auto Register (AgentMail + SimpleLogin)
 // @namespace    http://tampermonkey.net/
-// @version      69.0
-// @description  Авторегистрация ChatGPT через AgentMail.to + segmented control + нейтральная тема
+// @version      71.0
+// @description  Авторегистрация ChatGPT + стиль ChatGPT + настройки с динамическими блоками
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://auth.openai.com/*
@@ -40,7 +40,7 @@
     let helpModal = null, settingsModal = null, savedContext = null;
 
     // ============================================
-    // CSS
+    // CSS: палитра ChatGPT
     // ============================================
     function injectThemeStyles() {
         if (document.getElementById('gpt-auto-theme-styles')) return;
@@ -48,108 +48,109 @@
         s.id = 'gpt-auto-theme-styles';
         s.textContent = `
             :root {
-                --gpt-bg: rgba(255,255,255,0.88);
+                --gpt-bg: #ffffff;
                 --gpt-bg-solid: #ffffff;
+                --gpt-bg-elevated: #f4f4f4;
                 --gpt-fg: #0d0d0d;
                 --gpt-fg-muted: #8e8e8e;
-                --gpt-border: rgba(0,0,0,0.08);
-                --gpt-hover: rgba(0,0,0,0.05);
-                --gpt-shadow: rgba(0,0,0,0.12);
-                --gpt-overlay: rgba(0,0,0,0.5);
-                /* Акцент — нейтральный (чёрный в светлой теме) */
+                --gpt-border: rgba(0,0,0,0.10);
+                --gpt-hover: #ececec;
+                --gpt-shadow: rgba(0,0,0,0.10);
+                --gpt-overlay: rgba(0,0,0,0.45);
                 --gpt-accent: #0d0d0d;
                 --gpt-accent-fg: #ffffff;
                 --gpt-danger: #ef4146;
-                --gpt-blur: 20px;
                 --gpt-radius: 12px;
                 --gpt-ease: cubic-bezier(0.16, 1, 0.3, 1);
             }
             @media (prefers-color-scheme: dark) {
                 :root {
-                    --gpt-bg: rgba(23,23,23,0.88);
-                    --gpt-bg-solid: #171717;
+                    --gpt-bg: #212121;
+                    --gpt-bg-solid: #212121;
+                    --gpt-bg-elevated: #2f2f2f;
                     --gpt-fg: #ececec;
                     --gpt-fg-muted: #8e8e8e;
                     --gpt-border: rgba(255,255,255,0.10);
-                    --gpt-hover: rgba(255,255,255,0.08);
-                    --gpt-shadow: rgba(0,0,0,0.4);
-                    --gpt-overlay: rgba(0,0,0,0.7);
-                    /* Акцент — белый в тёмной теме */
+                    --gpt-hover: #2f2f2f;
+                    --gpt-shadow: rgba(0,0,0,0.5);
+                    --gpt-overlay: rgba(0,0,0,0.65);
                     --gpt-accent: #ececec;
                     --gpt-accent-fg: #0d0d0d;
                 }
             }
             html.dark {
-                --gpt-bg: rgba(23,23,23,0.88);
-                --gpt-bg-solid: #171717;
+                --gpt-bg: #212121;
+                --gpt-bg-solid: #212121;
+                --gpt-bg-elevated: #2f2f2f;
                 --gpt-fg: #ececec;
                 --gpt-fg-muted: #8e8e8e;
                 --gpt-border: rgba(255,255,255,0.10);
-                --gpt-hover: rgba(255,255,255,0.08);
-                --gpt-shadow: rgba(0,0,0,0.4);
-                --gpt-overlay: rgba(0,0,0,0.7);
+                --gpt-hover: #2f2f2f;
+                --gpt-shadow: rgba(0,0,0,0.5);
+                --gpt-overlay: rgba(0,0,0,0.65);
                 --gpt-accent: #ececec;
                 --gpt-accent-fg: #0d0d0d;
             }
 
             .gpt-glass {
-                background: var(--gpt-bg);
-                backdrop-filter: blur(var(--gpt-blur)) saturate(180%);
-                -webkit-backdrop-filter: blur(var(--gpt-blur)) saturate(180%);
+                background: var(--gpt-bg-solid);
                 border: 1px solid var(--gpt-border);
-                box-shadow: 0 4px 24px var(--gpt-shadow);
+                box-shadow: 0 8px 32px var(--gpt-shadow);
             }
 
             .gpt-input {
-                width: 100%; padding: 10px 12px; border-radius: 10px;
+                width: 100%; padding: 11px 14px; border-radius: 12px;
                 border: 1px solid var(--gpt-border);
-                background: var(--gpt-hover); color: var(--gpt-fg);
+                background: var(--gpt-bg-elevated); color: var(--gpt-fg);
                 font-size: 14px; box-sizing: border-box; font-family: inherit;
                 transition: border-color .2s var(--gpt-ease), background .2s var(--gpt-ease);
             }
-            .gpt-input:focus { outline: none; border-color: var(--gpt-fg); background: var(--gpt-bg-solid); }
+            .gpt-input:focus { outline: none; border-color: var(--gpt-fg); }
             .gpt-label { display: block; margin-bottom: 8px; color: var(--gpt-fg); font-size: 13px; font-weight: 600; }
-            .gpt-hint { color: var(--gpt-fg-muted); font-size: 12px; margin-top: 4px; line-height: 1.4; }
+            .gpt-hint { color: var(--gpt-fg-muted); font-size: 12px; margin-top: 6px; line-height: 1.5; }
 
-            /* Segmented control (переключатель режима) */
             .gpt-segment {
-                display: flex;
-                background: var(--gpt-hover);
-                border-radius: 10px;
-                padding: 3px;
-                gap: 2px;
-                margin-bottom: 18px;
+                display: flex; background: var(--gpt-bg-elevated);
+                border-radius: 12px; padding: 3px; gap: 2px; margin-bottom: 18px;
             }
             .gpt-segment button {
-                flex: 1;
-                padding: 9px 12px;
-                background: transparent;
-                color: var(--gpt-fg-muted);
-                border: none;
-                border-radius: 8px;
-                cursor: pointer;
-                font-size: 13px;
-                font-weight: 500;
-                font-family: inherit;
-                transition: background .18s var(--gpt-ease), color .18s var(--gpt-ease), box-shadow .18s var(--gpt-ease);
+                flex: 1; padding: 10px 12px; background: transparent;
+                color: var(--gpt-fg-muted); border: none; border-radius: 9px;
+                cursor: pointer; font-size: 13px; font-weight: 500; font-family: inherit;
+                transition: background .18s var(--gpt-ease), color .18s var(--gpt-ease);
             }
             .gpt-segment button.active {
-                background: var(--gpt-bg-solid);
-                color: var(--gpt-fg);
-                box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+                background: var(--gpt-bg); color: var(--gpt-fg);
+                box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+            }
+
+            .gpt-btn-primary {
+                padding: 14px;
+                background: var(--gpt-accent); color: var(--gpt-accent-fg);
+                border: none; border-radius: 999px;
+                font-size: 15px; cursor: pointer; font-weight: 600;
+                font-family: inherit;
+                transition: opacity .15s var(--gpt-ease);
+            }
+            .gpt-btn-primary:hover { opacity: 0.9; }
+            .gpt-btn-ghost {
+                padding: 12px; background: transparent;
+                color: var(--gpt-fg-muted); border: none;
+                font-size: 14px; cursor: pointer; font-family: inherit;
             }
 
             @keyframes gptMenuIn {
                 from { opacity: 0; transform: translateY(-6px) scale(0.97); }
                 to   { opacity: 1; transform: translateY(0) scale(1); }
             }
-            @keyframes gptFadeIn {
-                from { opacity: 0; }
-                to   { opacity: 1; }
-            }
+            @keyframes gptFadeIn { from { opacity: 0; } to { opacity: 1; } }
             @keyframes gptItemIn {
                 from { opacity: 0; transform: translateX(-4px); }
                 to   { opacity: 1; transform: translateX(0); }
+            }
+            @keyframes gptSlideDown {
+                from { opacity: 0; transform: translateY(-4px); }
+                to   { opacity: 1; transform: translateY(0); }
             }
 
             .gpt-menu-panel { animation: gptMenuIn .25s var(--gpt-ease) both; }
@@ -159,6 +160,10 @@
             }
             .gpt-menu-item:hover { background: var(--gpt-hover) !important; }
             .gpt-menu-item:active { transform: scale(0.98); }
+
+            .gpt-field-block {
+                animation: gptSlideDown .25s var(--gpt-ease) both;
+            }
         `;
         document.head.appendChild(s);
     }
@@ -276,7 +281,7 @@
     }
 
     // ============================================
-    // УВЕДОМЛЕНИЯ (без зелёного)
+    // УВЕДОМЛЕНИЯ
     // ============================================
     let notificationContainer = null;
 
@@ -289,13 +294,9 @@
 
     function showNotification(text, type = 'info', duration = 5000) {
         createNotificationContainer();
-        // Убрали зелёный (success теперь нейтральный серый)
         const colors = {
-            info: '#3498db',
-            success: '#8e8e8e',
-            warning: '#f39c12',
-            error: '#ef4146',
-            debug: '#8e8e8e'
+            info: '#3498db', success: '#8e8e8e',
+            warning: '#f39c12', error: '#ef4146', debug: '#8e8e8e'
         };
         const el = document.createElement('div');
         el.className = 'gpt-glass';
@@ -308,7 +309,7 @@
     }
 
     // ============================================
-    // НАСТРОЙКИ (segmented control)
+    // НАСТРОЙКИ
     // ============================================
     function showSettingsDialog() {
         return new Promise((resolve) => {
@@ -318,15 +319,15 @@
 
             const dialog = document.createElement('div');
             dialog.className = 'gpt-glass';
-            dialog.style.cssText = `padding:24px;border-radius:18px;max-width:480px;width:90%;color:var(--gpt-fg);animation:gptMenuIn .3s var(--gpt-ease) both;`;
+            dialog.style.cssText = `padding:24px;border-radius:20px;max-width:480px;width:90%;color:var(--gpt-fg);animation:gptMenuIn .3s var(--gpt-ease) both;`;
 
             dialog.innerHTML = `
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                    <h2 style="margin:0;font-size:18px;">Настройки скрипта</h2>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                    <h2 style="margin:0;font-size:18px;font-weight:600;">Настройки скрипта</h2>
                     <button id="closeSettings" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--gpt-fg-muted);padding:0 5px;">×</button>
                 </div>
-                <p style="color:var(--gpt-fg-muted);font-size:12px;margin:0 0 18px 0;">
-                    Ключи сохраняются в хранилище Tampermonkey и используются автоматически.
+                <p style="color:var(--gpt-fg-muted);font-size:12px;margin:0 0 20px 0;">
+                    Ключи сохраняются в хранилище Tampermonkey.
                 </p>
 
                 <label class="gpt-label">Режим работы</label>
@@ -335,22 +336,33 @@
                     <button type="button" data-mode="simplelogin">SimpleLogin</button>
                 </div>
 
-                <label class="gpt-label">AgentMail API Key <span style="color:var(--gpt-fg-muted);">*</span></label>
-                <input id="agentmail-input" class="gpt-input" type="password" placeholder="am_..." autocomplete="off">
-                <p class="gpt-hint">console.agentmail.to → API Keys → Create New API Key</p>
+                <div id="gpt-agentmail-block" class="gpt-field-block">
+                    <label class="gpt-label" id="gpt-agentmail-label">
+                        AgentMail API Key <span style="color:var(--gpt-fg-muted);">*</span>
+                    </label>
+                    <input id="agentmail-input" class="gpt-input" type="password" placeholder="am_..." autocomplete="off">
+                    <p class="gpt-hint" id="gpt-agentmail-hint">
+                        console.agentmail.to → API Keys → Create New API Key
+                    </p>
+                </div>
 
                 <div style="height:14px;"></div>
 
-                <label class="gpt-label">SimpleLogin API Key <span style="color:var(--gpt-fg-muted);font-weight:400;">(для режима SimpleLogin)</span></label>
-                <input id="simplelogin-input" class="gpt-input" type="password" placeholder="sl_..." autocomplete="off">
-                <p class="gpt-hint">app.simplelogin.io/dashboard/api_key</p>
+                <div id="gpt-simplelogin-block" class="gpt-field-block" style="display:none;">
+                    <label class="gpt-label">SimpleLogin API Key <span style="color:var(--gpt-fg-muted);">*</span></label>
+                    <input id="simplelogin-input" class="gpt-input" type="password" placeholder="sl_..." autocomplete="off">
+                    <p class="gpt-hint">
+                        app.simplelogin.io/dashboard/api_key<br>
+                        <span style="opacity:.8;">SimpleLogin создаёт алиас, который пересылает письма на AgentMail. Постоянный inbox в AgentMail нужно привязать как mailbox в SimpleLogin вручную.</span>
+                    </p>
+                </div>
 
                 <div style="height:20px;"></div>
 
                 <div style="display:flex;flex-direction:column;gap:10px;">
-                    <button id="saveSettings" style="padding:14px;background:var(--gpt-accent);color:var(--gpt-accent-fg);border:none;border-radius:12px;font-size:15px;cursor:pointer;font-weight:600;">Сохранить</button>
-                    <button id="clearSettings" style="padding:10px;background:transparent;color:var(--gpt-danger);border:1px solid var(--gpt-border);border-radius:10px;font-size:13px;cursor:pointer;">Удалить ключи</button>
-                    <button id="cancelSettings" style="padding:12px;background:transparent;color:var(--gpt-fg-muted);border:none;font-size:14px;cursor:pointer;">Отмена</button>
+                    <button id="saveSettings" class="gpt-btn-primary">Сохранить</button>
+                    <button id="clearSettings" style="padding:10px;background:transparent;color:var(--gpt-danger);border:1px solid var(--gpt-border);border-radius:999px;font-size:13px;cursor:pointer;font-family:inherit;">Удалить ключи</button>
+                    <button id="cancelSettings" class="gpt-btn-ghost">Отмена</button>
                 </div>
             `;
 
@@ -359,17 +371,31 @@
 
             const agentInput = dialog.querySelector('#agentmail-input');
             const slInput = dialog.querySelector('#simplelogin-input');
+            const agentLabel = dialog.querySelector('#gpt-agentmail-label');
+            const agentHint = dialog.querySelector('#gpt-agentmail-hint');
+            const slBlock = dialog.querySelector('#gpt-simplelogin-block');
+
             if (CONFIG.agentMailApiKey) agentInput.value = CONFIG.agentMailApiKey;
             if (CONFIG.simpleLoginApiKey) slInput.value = CONFIG.simpleLoginApiKey;
 
-            // Segmented control
             let selectedMode = CONFIG.emailMode;
+
+            const applyMode = () => {
+                const isSimple = selectedMode === 'simplelogin';
+                slBlock.style.display = isSimple ? 'block' : 'none';
+                agentLabel.innerHTML = isSimple
+                    ? 'AgentMail API Key <span style="color:var(--gpt-fg-muted);">* (relay для писем)</span>'
+                    : 'AgentMail API Key <span style="color:var(--gpt-fg-muted);">*</span>';
+                agentHint.innerHTML = isSimple
+                    ? 'console.agentmail.to → API Keys. Письма будут приходить в этот ящик.'
+                    : 'console.agentmail.to → API Keys → Create New API Key';
+            };
+
             const segment = dialog.querySelector('#gpt-mode-segment');
             const segButtons = segment.querySelectorAll('button');
             const updateSegment = () => {
-                segButtons.forEach(b => {
-                    b.classList.toggle('active', b.dataset.mode === selectedMode);
-                });
+                segButtons.forEach(b => b.classList.toggle('active', b.dataset.mode === selectedMode));
+                applyMode();
             };
             updateSegment();
             segButtons.forEach(b => {
@@ -696,15 +722,15 @@
             dialog.className = 'gpt-glass';
             dialog.style.cssText = `padding:28px;border-radius:20px;max-width:420px;width:90%;text-align:center;color:var(--gpt-fg);animation:gptMenuIn .3s var(--gpt-ease) both;`;
             dialog.innerHTML = `
-                <h2 style="margin:0 0 16px;">Регистрация ChatGPT</h2>
-                <p style="color:var(--gpt-fg-muted);font-size:13px;margin-bottom:16px;">
-                    Режим: <b>${CONFIG.emailMode === 'simplelogin' ? 'SimpleLogin → AgentMail' : 'AgentMail (прямой)'}</b>
+                <h2 style="margin:0 0 8px;font-size:18px;font-weight:600;">Регистрация ChatGPT</h2>
+                <p style="color:var(--gpt-fg-muted);font-size:13px;margin:0 0 18px 0;">
+                    Режим: <b style="color:var(--gpt-fg);">${CONFIG.emailMode === 'simplelogin' ? 'SimpleLogin → AgentMail' : 'AgentMail (прямой)'}</b>
                 </p>
-                <p style="color:var(--gpt-fg-muted);font-size:12px;" id="oldEmailDisplay"></p>
+                <p style="color:var(--gpt-fg-muted);font-size:12px;margin:0 0 16px 0;" id="oldEmailDisplay"></p>
                 <div style="display:flex;flex-direction:column;gap:10px;">
-                    <button id="newEmailBtn" style="padding:14px;background:var(--gpt-accent);color:var(--gpt-accent-fg);border:none;border-radius:12px;font-size:15px;cursor:pointer;font-weight:600;">Новая регистрация</button>
-                    <button id="oldEmailBtn" style="padding:14px;background:var(--gpt-hover);color:var(--gpt-fg);border:1px solid var(--gpt-border);border-radius:12px;font-size:15px;cursor:pointer;display:none;">Продолжить прошлую</button>
-                    <button id="cancelBtn" style="padding:12px;background:transparent;color:var(--gpt-fg-muted);border:none;font-size:14px;cursor:pointer;">Отмена</button>
+                    <button id="newEmailBtn" class="gpt-btn-primary">Новая регистрация</button>
+                    <button id="oldEmailBtn" style="padding:14px;background:var(--gpt-bg-elevated);color:var(--gpt-fg);border:1px solid var(--gpt-border);border-radius:999px;font-size:15px;cursor:pointer;display:none;font-family:inherit;">Продолжить прошлую</button>
+                    <button id="cancelBtn" class="gpt-btn-ghost">Отмена</button>
                 </div>`;
             overlay.appendChild(dialog); document.body.appendChild(overlay);
             const old = await getData('currentInbox');
@@ -727,22 +753,31 @@
         helpModal.style.cssText = 'position:fixed;inset:0;background:var(--gpt-overlay);z-index:999999;display:flex;align-items:center;justify-content:center;animation:gptFadeIn .2s var(--gpt-ease) both;';
         const modal = document.createElement('div');
         modal.className = 'gpt-glass';
-        modal.style.cssText = `padding:24px;border-radius:18px;max-width:640px;width:90%;max-height:80vh;overflow-y:auto;color:var(--gpt-fg);animation:gptMenuIn .3s var(--gpt-ease) both;`;
+        modal.style.cssText = `padding:24px;border-radius:20px;max-width:640px;width:90%;max-height:80vh;overflow-y:auto;color:var(--gpt-fg);animation:gptMenuIn .3s var(--gpt-ease) both;`;
 
         modal.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
-                <h2 style="margin:0;font-size:20px;">Помощь — ChatGPT Auto Register</h2>
+                <h2 style="margin:0;font-size:20px;font-weight:600;">Помощь — ChatGPT Auto Register</h2>
                 <button id="closeHelp" style="background:none;border:none;font-size:24px;cursor:pointer;color:var(--gpt-fg-muted);padding:0 5px;">×</button>
             </div>
             <div style="line-height:1.6;font-size:14px;">
                 <div style="margin-bottom:22px;">
-                    <h3 style="margin:0 0 12px 0;font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">🔑 Шаг 1. Ключи</h3>
+                    <h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gpt-fg);">🔑 Шаг 1. Ключи</h3>
                     <p style="margin:0 0 10px 0;"><b>AgentMail:</b> console.agentmail.to → API Keys → Create</p>
-                    <p style="margin:0;"><b>SimpleLogin (опционально):</b> app.simplelogin.io/dashboard/api_key</p>
+                    <p style="margin:0;"><b>SimpleLogin:</b> app.simplelogin.io/dashboard/api_key</p>
                 </div>
                 <div style="margin-bottom:22px;">
-                    <h3 style="margin:0 0 12px 0;font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">🚀 Регистрация</h3>
-                    <ol style="margin:0;padding-left:20px;">
+                    <h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gpt-fg);">📧 SimpleLogin → AgentMail</h3>
+                    <ol style="margin:0;padding-left:20px;color:var(--gpt-fg-muted);font-size:13px;line-height:1.7;">
+                        <li>Создайте <b style="color:var(--gpt-fg);">постоянный</b> inbox в AgentMail (не удаляйте его).</li>
+                        <li>В SimpleLogin → <b style="color:var(--gpt-fg);">Mailboxes</b> → Add Mailbox → укажите адрес AgentMail.</li>
+                        <li>Подтвердите письмо, сделайте mailbox дефолтным.</li>
+                        <li>Скрипт будет создавать новый алиас SimpleLogin на каждую регистрацию, а письма будут идти в AgentMail.</li>
+                    </ol>
+                </div>
+                <div style="margin-bottom:22px;">
+                    <h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gpt-fg);">🚀 Регистрация</h3>
+                    <ol style="margin:0;padding-left:20px;color:var(--gpt-fg-muted);font-size:13px;line-height:1.7;">
                         <li>Откройте chatgpt.com (не авторизованы).</li>
                         <li>☰ → Регистрация → «Новая регистрация».</li>
                         <li>Скрипт сам создаст почту, введёт email, дождётся кода, вставит код, при необходимости создаст пароль и заполнит профиль.</li>
@@ -750,8 +785,8 @@
                     </ol>
                 </div>
                 <div>
-                    <h3 style="margin:0 0 12px 0;font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">📋 Контекст</h3>
-                    <p style="margin:0;">☰ → Копировать контекст → выход → новая регистрация → ☰ → Вставить контекст.</p>
+                    <h3 style="margin:0 0 12px 0;font-size:15px;font-weight:600;color:var(--gpt-fg);">📋 Контекст</h3>
+                    <p style="margin:0;color:var(--gpt-fg-muted);font-size:13px;">☰ → Копировать контекст → выход → новая регистрация → ☰ → Вставить контекст.</p>
                 </div>
             </div>
         `;
@@ -864,7 +899,6 @@
         const copy = menuPanel.querySelector('#gpt-copy-btn');
         const paste = menuPanel.querySelector('#gpt-paste-btn');
 
-        // ⚡ Регистрацию скрываем ТОЛЬКО если авторизованы СЕЙЧАС
         if (register) register.style.display = loggedIn ? 'none' : 'flex';
         if (copy) copy.style.display = loggedIn ? 'flex' : 'none';
         if (paste) paste.style.display = loggedIn ? 'flex' : 'none';
@@ -875,21 +909,19 @@
         if (!document.body) return;
 
         const isMobile = window.innerWidth < 768;
-        // На мобильных родной гамбургер ~ left: 16px, кнопка ~ 36px шириной + отступ
-        const leftPos = isMobile ? '60px' : '68px';
+        const leftPos = isMobile ? '56px' : '64px';
 
-        // ⚡ Кнопка — только иконка, без фона и рамки
         menuButton = document.createElement('button');
         menuButton.id = 'gpt-menu-btn';
         menuButton.title = 'Меню ChatGPT Auto Register';
         menuButton.innerHTML = ICON_HAMBURGER;
         menuButton.style.cssText = `
-            position:fixed; top:10px; left:${leftPos}; z-index:99999;
+            position:fixed; top:8px; left:${leftPos}; z-index:99999;
             width:36px; height:36px;
-            padding:0; margin:0;
+            padding:0;
             background:transparent; color:var(--gpt-fg);
             border:none; border-radius:8px;
-            cursor:pointer; font-family:inherit;
+            cursor:pointer;
             display:flex; align-items:center; justify-content:center;
             transition: background .15s var(--gpt-ease);
         `;
@@ -897,12 +929,11 @@
         menuButton.addEventListener('mouseleave', () => { menuButton.style.background = 'transparent'; });
         menuButton.onclick = (e) => { e.stopPropagation(); toggleMenu(); };
 
-        // Статус — показываем как маленькую подпись под кнопкой, отдельно
         statusLabel = document.createElement('div');
         statusLabel.id = 'gpt-menu-status';
         statusLabel.style.cssText = `
-            position:fixed; top:48px; left:${leftPos};
-            font-size:11px; font-weight:600;
+            position:fixed; top:44px; left:${leftPos};
+            font-size:10px; font-weight:600;
             color:var(--gpt-fg); text-align:center; width:36px;
             pointer-events:none;
         `;
@@ -945,7 +976,7 @@
         });
 
         window.addEventListener('resize', () => {
-            const newLeft = window.innerWidth < 768 ? '60px' : '68px';
+            const newLeft = window.innerWidth < 768 ? '56px' : '64px';
             if (menuButton) menuButton.style.left = newLeft;
             if (menuPanel) menuPanel.style.left = newLeft;
             if (statusLabel) statusLabel.style.left = newLeft;
@@ -1001,7 +1032,7 @@
         let emailToUse;
 
         if (choice === 'new') {
-            setMenuStatus('Создаю…', 'var(--gpt-fg)');
+            setMenuStatus('Почта…', 'var(--gpt-fg)');
 
             if (CONFIG.emailMode === 'simplelogin') {
                 const inboxes = await listAgentMailInboxes();
@@ -1040,7 +1071,7 @@
                 return;
             }
 
-            setMenuStatus('Проверяю…', 'var(--gpt-fg)');
+            setMenuStatus('Проверка…', 'var(--gpt-fg)');
             const inboxes = await listAgentMailInboxes();
             const exists = inboxes.some(i =>
                 (i.inbox_id || i.email) === saved.inboxId ||
@@ -1348,12 +1379,10 @@
             savedContext = await getData('savedContext');
             currentInbox = await getData('currentInbox');
 
-            // ⚡ Восстанавливаем registrationComplete ТОЛЬКО если сейчас авторизованы
             const wasComplete = await getData('complete');
             if (wasComplete && isUserLoggedIn()) {
                 registrationComplete = true;
             } else if (wasComplete && !isUserLoggedIn()) {
-                // Сбрасываем флаг, если пользователь не залогинен
                 await saveData('complete', null);
                 registrationComplete = false;
             }
