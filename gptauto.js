@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ChatGPT Auto Register (AgentMail + SimpleLogin)
+// @name         ChatGPT Auto Register (AgentMail)
 // @namespace    http://tampermonkey.net/
 // @version      62.0
-// @description  Авторегистрация ChatGPT. Поддержка прямого AgentMail (с удалением) и SimpleLogin (через ручной бэкенд AgentMail).
+// @description  Авторегистрация ChatGPT через AgentMail.to + настройки + авто-тема
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://auth.openai.com/*
@@ -10,112 +10,89 @@
 // @grant        GM.getValue
 // @grant        GM.setValue
 // @grant        GM_setClipboard
-// @grant        GM_registerMenuCommand
-// @grant        GM_addStyle
 // @connect      api.agentmail.to
-// @connect      app.simplelogin.io
-// @run-at       document-idle
+// @run-at       document-end
 // ==/UserScript==
 
 (function() {
     'use strict';
 
     // ============================================
-    // 1. СТИЛИ (GM_addStyle обходит CSP ChatGPT)
+    // CONFIG
     // ============================================
-    GM_addStyle(`
-        #ar-floating-menu {
-            position: fixed; bottom: 30px; right: 30px; z-index: 2147483647;
-            display: flex; flex-direction: column; align-items: flex-end; gap: 12px;
-        }
-        #ar-main-btn {
-            width: 60px; height: 60px; border-radius: 50%; background: #10a37f; color: #fff;
-            border: 2px solid #0e8a6a; cursor: pointer; display: flex; align-items: center; justify-content: center;
-            box-shadow: 0 6px 20px rgba(0,0,0,0.3); transition: transform 0.2s, background 0.2s;
-        }
-        #ar-main-btn:hover { transform: scale(1.1); background: #0e8a6a; }
-        #ar-sub-menu {
-            display: none; flex-direction: column; gap: 10px;
-        }
-        .ar-sub-btn {
-            width: 50px; height: 50px; border-radius: 50%; background: var(--ar-bg, #ffffff); color: var(--ar-fg, #222222);
-            border: 1px solid var(--ar-border, #e0e0e0); cursor: pointer; display: flex; align-items: center; justify-content: center;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15); transition: background 0.2s;
-        }
-        .ar-sub-btn:hover { background: var(--ar-hover, #f5f5f5) !important; }
-        
-        /* Модальные окна */
-        .ar-overlay {
-            position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 2147483646;
-            display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px);
-        }
-        .ar-modal {
-            background: var(--ar-bg, #ffffff); padding: 28px; border-radius: 20px;
-            max-width: 550px; width: 90%; box-shadow: 0 10px 40px rgba(0,0,0,0.4);
-            max-height: 85vh; overflow-y: auto;
-        }
-        .ar-input {
-            width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--ar-border, #ddd);
-            background: var(--ar-input-bg, #f9f9f9); color: var(--ar-fg, #222); font-size: 15px; box-sizing: border-box; margin-bottom: 12px;
-        }
-        .ar-btn-primary {
-            padding: 14px 20px; background: #10a37f; color: #fff; border: none; border-radius: 10px;
-            cursor: pointer; font-size: 16px; font-weight: 600; width: 100%; margin-bottom: 10px;
-        }
-        .ar-btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-        .ar-btn-secondary {
-            padding: 12px 20px; background: transparent; color: var(--ar-fg, #666); border: 1px solid var(--ar-border, #ddd);
-            border-radius: 10px; cursor: pointer; font-size: 15px; width: 100%; margin-bottom: 10px;
-        }
-        .ar-btn-text {
-            padding: 10px; background: transparent; color: var(--ar-fg-muted, #999); border: none;
-            cursor: pointer; font-size: 14px; width: 100%;
-        }
-        .ar-help-text { color: var(--ar-fg, #333); line-height: 1.6; font-size: 14px; }
-        .ar-help-text h3 { color: var(--ar-fg, #1a1a1a); font-size: 16px; border-bottom: 2px solid var(--ar-border, #e0e0e0); padding-bottom: 8px; margin-top: 20px; }
-        .ar-help-text code { background: var(--ar-input-bg, #f0f0f0); padding: 2px 6px; border-radius: 4px; font-family: monospace; }
-    `);
-
     const CONFIG = {
+        agentMailApiKey: '',            // заполняется через форму настроек
+        agentMailBase: 'https://api.agentmail.to/v0',
         checkInterval: 3000,
         maxAttempts: 120,
         timeToleranceMs: 60000,
         fastMode: true,
     };
 
-    let sessionState = {
-        isRunning: false,
-        registrationComplete: false,
-        codeInserted: false,
-        verifyCompleted: false,
-        inboxId: null,
-        inboxEmail: null,
-        slAliasId: null,
-        codeRequestedAt: null,
-        usedMessageIds: new Set(),
-        savedContext: null
-    };
+    let codeInserted = false, profileFilled = false, registrationComplete = false,
+        isRunning = false, loginAttempted = false, verifyCompleted = false,
+        initDone = false, currentInbox = null, pollingActive = false;
+
+    let codeRequestedAt = null, usedMessageIds = new Set(), urlWatcher = null;
+    let authObserver = null, helpModal = null, settingsModal = null;
+    let savedContext = null;
 
     // ============================================
-    // 2. УТИЛИТЫ И ТЕМЫ
+    // ТЕМА: CSS-переменные
     // ============================================
-    function getTheme() {
-        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) return 'dark';
-        if (document.documentElement.classList.contains('dark') || document.body.classList.contains('dark')) return 'dark';
-        return 'light';
+    function injectThemeStyles() {
+        if (document.getElementById('gpt-auto-theme-styles')) return;
+        const s = document.createElement('style');
+        s.id = 'gpt-auto-theme-styles';
+        s.textContent = `
+            :root {
+                --gpt-bg: #ffffff;
+                --gpt-fg: #222222;
+                --gpt-fg-muted: #999999;
+                --gpt-border: #e0e0e0;
+                --gpt-hover: #f5f5f5;
+                --gpt-shadow: rgba(0,0,0,0.15);
+                --gpt-overlay: rgba(0,0,0,0.7);
+                --gpt-accent: #10a37f;
+                --gpt-danger: #e74c3c;
+            }
+            @media (prefers-color-scheme: dark) {
+                :root {
+                    --gpt-bg: #1e1e1e;
+                    --gpt-fg: #eeeeee;
+                    --gpt-fg-muted: #777777;
+                    --gpt-border: #444444;
+                    --gpt-hover: #3a3a3a;
+                    --gpt-shadow: rgba(0,0,0,0.5);
+                    --gpt-overlay: rgba(0,0,0,0.75);
+                }
+            }
+            html.dark {
+                --gpt-bg: #1e1e1e;
+                --gpt-fg: #eeeeee;
+                --gpt-fg-muted: #777777;
+                --gpt-border: #444444;
+                --gpt-hover: #3a3a3a;
+                --gpt-shadow: rgba(0,0,0,0.5);
+                --gpt-overlay: rgba(0,0,0,0.75);
+            }
+            .gpt-input {
+                width: 100%; padding: 10px 12px; border-radius: 8px;
+                border: 1px solid var(--gpt-border);
+                background: var(--gpt-hover); color: var(--gpt-fg);
+                font-size: 14px; box-sizing: border-box;
+                font-family: inherit;
+            }
+            .gpt-input:focus { outline: 2px solid var(--gpt-accent); outline-offset: -1px; }
+            .gpt-label { display: block; margin-bottom: 6px; color: var(--gpt-fg); font-size: 13px; font-weight: 600; }
+            .gpt-hint { color: var(--gpt-fg-muted); font-size: 12px; margin-top: 4px; line-height: 1.4; }
+        `;
+        document.head.appendChild(s);
     }
 
-    function applyThemeStyles() {
-        const isDark = getTheme() === 'dark';
-        const root = document.documentElement;
-        root.style.setProperty('--ar-bg', isDark ? '#1e1e1e' : '#ffffff');
-        root.style.setProperty('--ar-fg', isDark ? '#eeeeee' : '#222222');
-        root.style.setProperty('--ar-fg-muted', isDark ? '#888888' : '#999999');
-        root.style.setProperty('--ar-border', isDark ? '#444444' : '#e0e0e0');
-        root.style.setProperty('--ar-input-bg', isDark ? '#2d2d2d' : '#f9f9f9');
-        root.style.setProperty('--ar-hover', isDark ? '#3a3a3a' : '#f0f0f0');
-    }
-
+    // ============================================
+    // БАЗОВЫЕ УТИЛИТЫ
+    // ============================================
     function humanDelay(min, max) {
         if (CONFIG.fastMode) { min = Math.min(min, 100); max = Math.min(max, 250); }
         const base = min + Math.random() * (max - min);
@@ -135,7 +112,9 @@
     function dispatchInputEvent(element, value) {
         if (!element) return;
         try {
-            element.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: value }));
+            element.dispatchEvent(new InputEvent('input', {
+                bubbles: true, cancelable: true, inputType: 'insertText', data: value
+            }));
         } catch (e) { element.dispatchEvent(new Event('input', { bubbles: true })); }
     }
 
@@ -170,176 +149,298 @@
     }
 
     async function saveData(key, value) {
-        try { await GM.setValue('chatgpt_ar_' + key, value); return true; } catch (e) { return false; }
+        try { await GM.setValue('chatgpt_helper_' + key, value); return true; } catch (e) { return false; }
     }
     async function getData(key) {
-        try { return await GM.getValue('chatgpt_ar_' + key, null); } catch (e) { return null; }
+        try { return await GM.getValue('chatgpt_helper_' + key, null); } catch (e) { return null; }
     }
 
     // ============================================
-    // 3. УВЕДОМЛЕНИЯ
+    // УВЕДОМЛЕНИЯ
     // ============================================
     let notificationContainer = null;
+
     function createNotificationContainer() {
-        if (notificationContainer && document.body.contains(notificationContainer)) return;
+        if (notificationContainer) return;
         notificationContainer = document.createElement('div');
-        notificationContainer.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:2147483647;display:flex;flex-direction:column;gap:8px;max-width:90%;width:480px;pointer-events:none;';
+        notificationContainer.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:999999;display:flex;flex-direction:column;gap:8px;max-width:90%;width:480px;pointer-events:none;';
         document.body.appendChild(notificationContainer);
     }
 
     function showNotification(text, type = 'info', duration = 5000) {
         createNotificationContainer();
-        const isDark = getTheme() === 'dark';
-        const colors = { info: isDark ? '#2d6b9b' : '#3498db', success: '#10a37f', warning: isDark ? '#b8860b' : '#f39c12', error: isDark ? '#8b1a1a' : '#e74c3c', debug: isDark ? '#555' : '#7f8c8d' };
+        const colors = { info: '#3498db', success: '#10a37f', warning: '#f39c12', error: '#e74c3c', debug: '#7f8c8d' };
         const el = document.createElement('div');
-        el.style.cssText = `background:${isDark ? '#1e1e1e' : '#fff'};color:${isDark ? '#eee' : '#222'};padding:14px 18px;border-radius:12px;font-size:15px;box-shadow:0 4px 20px rgba(0,0,0,${isDark ? '0.4' : '0.15'});border-left:5px solid ${colors[type] || '#333'};pointer-events:auto;display:flex;align-items:center;gap:10px;word-break:break-word;`;
+        el.style.cssText = `background:var(--gpt-bg);color:var(--gpt-fg);padding:12px 16px;border-radius:12px;font-size:14px;box-shadow:0 4px 20px var(--gpt-shadow);border-left:4px solid ${colors[type] || '#333'};pointer-events:auto;display:flex;align-items:center;gap:10px;word-break:break-word;`;
         el.innerHTML = `<span>${text}</span>`;
         notificationContainer.appendChild(el);
         setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.4s'; setTimeout(() => { if (el.parentNode) el.remove(); }, 400); }, duration);
-        console.log(`[AUTO-REG ${type.toUpperCase()}] ${text}`);
+        console.log(`[${(type || 'info').toUpperCase()}] ${text}`);
+        return el;
     }
 
     // ============================================
-    // 4. API: AgentMail.to
+    // НАСТРОЙКИ (форма ввода ключей)
     // ============================================
-    function apiRequest(method, url, token, data) {
+    function showSettingsDialog(opts = {}) {
         return new Promise((resolve) => {
+            if (settingsModal) settingsModal.remove();
+            settingsModal = document.createElement('div');
+            settingsModal.style.cssText = 'position:fixed;inset:0;background:var(--gpt-overlay);z-index:999999;display:flex;align-items:center;justify-content:center;';
+
+            const dialog = document.createElement('div');
+            dialog.style.cssText = `background:var(--gpt-bg);color:var(--gpt-fg);padding:24px;border-radius:16px;max-width:460px;width:90%;box-shadow:0 10px 40px var(--gpt-shadow);`;
+
+            dialog.innerHTML = `
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <h2 style="margin:0;color:var(--gpt-fg);font-size:18px;">Настройки скрипта</h2>
+                    <button id="closeSettings" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--gpt-fg-muted);padding:0 5px;">×</button>
+                </div>
+                <p style="color:var(--gpt-fg-muted);font-size:12px;margin:0 0 20px 0;">
+                    Ключи сохраняются в хранилище Tampermonkey и используются автоматически при следующих запусках.
+                </p>
+
+                <label class="gpt-label">AgentMail API Key <span style="color:var(--gpt-accent);">*</span></label>
+                <input id="agentmail-input" class="gpt-input" type="password" placeholder="am_..." autocomplete="off">
+                <p class="gpt-hint">Получить: console.agentmail.to → API Keys → Create New API Key</p>
+
+                <div style="height:18px;"></div>
+
+                <label class="gpt-label">SimpleLogin API Key <span style="color:var(--gpt-fg-muted);font-weight:400;">(опционально)</span></label>
+                <input id="simplelogin-input" class="gpt-input" type="password" placeholder="sl_..." autocomplete="off">
+                <p class="gpt-hint">Если оставить пустым — не используется.</p>
+
+                <div style="height:22px;"></div>
+
+                <div style="display:flex;flex-direction:column;gap:10px;">
+                    <button id="saveSettings" style="padding:14px;background:var(--gpt-accent);color:white;border:none;border-radius:12px;font-size:15px;cursor:pointer;font-weight:600;">
+                        Сохранить
+                    </button>
+                    <button id="clearSettings" style="padding:10px;background:transparent;color:var(--gpt-danger);border:1px solid var(--gpt-border);border-radius:10px;font-size:13px;cursor:pointer;">
+                        Удалить сохранённые ключи
+                    </button>
+                    <button id="cancelSettings" style="padding:12px;background:transparent;color:var(--gpt-fg-muted);border:none;font-size:14px;cursor:pointer;">
+                        Отмена
+                    </button>
+                </div>
+            `;
+
+            settingsModal.appendChild(dialog);
+            document.body.appendChild(settingsModal);
+
+            const agentInput = dialog.querySelector('#agentmail-input');
+            const slInput = dialog.querySelector('#simplelogin-input');
+
+            // Предзаполняем существующими значениями
+            if (CONFIG.agentMailApiKey) agentInput.value = CONFIG.agentMailApiKey;
+
+            const close = (result) => {
+                settingsModal.remove();
+                settingsModal = null;
+                resolve(result);
+            };
+
+            dialog.querySelector('#closeSettings').onclick = () => close(null);
+            dialog.querySelector('#cancelSettings').onclick = () => close(null);
+            settingsModal.onclick = (e) => { if (e.target === settingsModal) close(null); };
+
+            dialog.querySelector('#saveSettings').onclick = async () => {
+                const agentMail = agentInput.value.trim();
+                const simpleLogin = slInput.value.trim();
+
+                if (!agentMail) {
+                    showNotification('Укажите AgentMail API Key', 'error', 4000);
+                    return;
+                }
+                if (!agentMail.startsWith('am_')) {
+                    showNotification('AgentMail ключ обычно начинается с "am_"', 'warning', 5000);
+                }
+
+                await saveData('agentMailApiKey', agentMail);
+                await saveData('simpleLoginApiKey', simpleLogin || null);
+
+                CONFIG.agentMailApiKey = agentMail;
+
+                showNotification('Настройки сохранены', 'success', 3000);
+                close({ agentMail, simpleLogin });
+            };
+
+            dialog.querySelector('#clearSettings').onclick = async () => {
+                await saveData('agentMailApiKey', null);
+                await saveData('simpleLoginApiKey', null);
+                CONFIG.agentMailApiKey = '';
+                agentInput.value = '';
+                slInput.value = '';
+                showNotification('Ключи удалены', 'info', 3000);
+            };
+
+            setTimeout(() => agentInput.focus(), 100);
+        });
+    }
+
+    async function ensureApiKeys() {
+        const saved = await getData('agentMailApiKey');
+        if (saved) {
+            CONFIG.agentMailApiKey = saved;
+            return true;
+        }
+        const result = await showSettingsDialog();
+        if (!result) return false;
+        return true;
+    }
+
+    // ============================================
+    // AGENTMAIL: создание ящика
+    // ============================================
+    function createAgentMailInbox() {
+        return new Promise((resolve) => {
+            if (!CONFIG.agentMailApiKey) {
+                showNotification('AgentMail: ключ не задан (откройте Настройки)', 'error', 10000);
+                resolve(null); return;
+            }
             GM_xmlhttpRequest({
-                method, url,
+                method: 'POST',
+                url: `${CONFIG.agentMailBase}/inboxes`,
                 headers: {
+                    'Authorization': `Bearer ${CONFIG.agentMailApiKey}`,
                     'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                    ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+                    'Accept': 'application/json'
                 },
-                data: data ? JSON.stringify(data) : null,
-                onload: (resp) => resolve(resp),
-                onerror: (e) => resolve({ status: 0, responseText: '', error: e }),
-                ontimeout: () => resolve({ status: 0, responseText: 'timeout' })
+                data: JSON.stringify({ displayName: 'ChatGPT Auto' }),
+                onload: (resp) => {
+                    if (resp.status !== 200 && resp.status !== 201) {
+                        showNotification(`AgentMail: ${resp.status} ${resp.responseText.slice(0, 150)}`, 'error', 12000);
+                        resolve(null); return;
+                    }
+                    try {
+                        const data = JSON.parse(resp.responseText);
+                        resolve({
+                            inboxId: data.inbox_id,
+                            email: data.inbox_id || data.email || data.address
+                        });
+                    } catch (e) { resolve(null); }
+                },
+                onerror: () => { showNotification('AgentMail: сетевая ошибка', 'error'); resolve(null); },
+                ontimeout: () => { showNotification('AgentMail: таймаут', 'error'); resolve(null); }
             });
         });
     }
 
-    async function createAgentMailInbox() {
-        const apiKey = await getData('agentMailApiKey');
-        if (!apiKey) { showNotification('Не указан API ключ AgentMail.to!', 'error', 8000); return null; }
-        const resp = await apiRequest('POST', 'https://api.agentmail.to/v0/inboxes', apiKey, {});
-        if (resp.status !== 200 && resp.status !== 201) {
-            showNotification(`AgentMail: ошибка создания (${resp.status})`, 'error', 8000);
-            return null;
-        }
-        try {
-            const data = JSON.parse(resp.responseText);
-            return { id: data.id || data.inbox_id, email: data.email_address || data.email || data.address };
-        } catch (e) { return null; }
-    }
-
-    async function deleteAgentMailInbox(inboxId) {
-        if (!inboxId) return;
-        const apiKey = await getData('agentMailApiKey');
-        if (!apiKey) return;
-        await apiRequest('DELETE', `https://api.agentmail.to/v0/inboxes/${inboxId}`, apiKey);
-    }
-
-    async function getAgentMailMessages(inboxId) {
-        const apiKey = await getData('agentMailApiKey');
-        if (!apiKey || !inboxId) return null;
-        const resp = await apiRequest('GET', `https://api.agentmail.to/v0/inboxes/${inboxId}/messages`, apiKey);
-        if (resp.status !== 200) return null;
-        try { return JSON.parse(resp.responseText); } catch (e) { return null; }
-    }
-
-    async function getAgentMailMessageDetail(inboxId, messageId) {
-        const apiKey = await getData('agentMailApiKey');
-        if (!apiKey || !inboxId || !messageId) return null;
-        const resp = await apiRequest('GET', `https://api.agentmail.to/v0/inboxes/${inboxId}/messages/${encodeURIComponent(messageId)}`, apiKey);
-        if (resp.status !== 200) return null;
-        try { return JSON.parse(resp.responseText); } catch (e) { return null; }
-    }
-
-    // ============================================
-    // 5. API: SimpleLogin
-    // ============================================
-    async function createSimpleLoginAlias(forwardToEmail) {
-        const apiKey = await getData('simpleLoginApiKey');
-        if (!apiKey) return null;
-
-        // Находим ID ящика, который пользователь вручную привязал
-        const mailboxesResp = await apiRequest('GET', 'https://app.simplelogin.io/api/mailboxes', apiKey);
-        let targetMailboxId = null;
-        if (mailboxesResp.status === 200) {
-            try {
-                const mailboxes = JSON.parse(mailboxesResp.responseText).mailboxes || [];
-                const mb = mailboxes.find(m => m.email === forwardToEmail);
-                if (mb) targetMailboxId = mb.id;
-            } catch(e) {}
-        }
-
-        if (!targetMailboxId) {
-            showNotification('SimpleLogin: Ящик для пересылки не найден. Проверьте настройки.', 'error', 8000);
-            return null;
-        }
-
-        const prefix = 'gpt_' + Math.random().toString(36).substring(2, 10);
-        const aliasResp = await apiRequest('POST', 'https://app.simplelogin.io/api/aliases', apiKey, {
-            alias_prefix: prefix,
-            mailbox_ids: [targetMailboxId],
-            note: 'ChatGPT Auto Register'
+    function listAgentMailMessages(inboxId) {
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `${CONFIG.agentMailBase}/inboxes/${encodeURIComponent(inboxId)}/messages?limit=10`,
+                headers: {
+                    'Authorization': `Bearer ${CONFIG.agentMailApiKey}`,
+                    'Accept': 'application/json'
+                },
+                onload: (resp) => {
+                    if (resp.status !== 200) { resolve(null); return; }
+                    try { resolve(JSON.parse(resp.responseText).messages || []); }
+                    catch (e) { resolve(null); }
+                },
+                onerror: () => resolve(null),
+                ontimeout: () => resolve(null)
+            });
         });
-
-        if (aliasResp.status === 200 || aliasResp.status === 201) {
-            try {
-                const data = JSON.parse(aliasResp.responseText);
-                return { alias: data.alias || data.email, id: data.id };
-            } catch(e) {}
-        }
-        return null;
     }
 
-    async function deleteSimpleLoginAlias(aliasId) {
-        if (!aliasId) return;
-        const apiKey = await getData('simpleLoginApiKey');
-        if (!apiKey) return;
-        await apiRequest('DELETE', `https://app.simplelogin.io/api/aliases/${aliasId}`, apiKey);
+    function getAgentMailMessage(inboxId, messageId) {
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `${CONFIG.agentMailBase}/inboxes/${encodeURIComponent(inboxId)}/messages/${encodeURIComponent(messageId)}`,
+                headers: {
+                    'Authorization': `Bearer ${CONFIG.agentMailApiKey}`,
+                    'Accept': 'application/json'
+                },
+                onload: (resp) => {
+                    if (resp.status !== 200) { resolve(null); return; }
+                    try { resolve(JSON.parse(resp.responseText)); }
+                    catch (e) { resolve(null); }
+                },
+                onerror: () => resolve(null),
+                ontimeout: () => resolve(null)
+            });
+        });
     }
 
     // ============================================
-    // 6. ПОИСК КОДА И ВВОД (Как в оригинальном gpt.js)
+    // ИЗВЛЕЧЕНИЕ КОДА
     // ============================================
     function extractCode(emailData) {
         if (!emailData) return null;
-        const raw = [emailData.text, emailData.html, emailData.subject].filter(Boolean).join('\n')
-            .replace(/<[^>]*>/g, ' ').replace(/&nbsp;|&#160;/g, ' ');
+        const raw = [
+            emailData.extracted_text,
+            emailData.extracted_html,
+            emailData.text,
+            emailData.html,
+            emailData.subject
+        ].filter(Boolean).join('\n')
+            .replace(/<[^>]*>/g, ' ')
+            .replace(/&nbsp;|&#160;/g, ' ');
         const glued = raw.replace(/(\d)[\s\u00a0]+(?=\d)/g, '$1');
         const m = glued.match(/(?:код|code|verification)[^\d\n]{0,40}(\d{6})/i) || glued.match(/\b(\d{6})\b/);
         if (m && !/^(19|20)\d{2}$/.test(m[1])) return m[1];
         return null;
     }
 
+    const msgTime = (m) => new Date(m.timestamp || m.created_at || 0).getTime();
+    function isFresh(msg) {
+        if (!codeRequestedAt) return true;
+        return msgTime(msg) >= codeRequestedAt - CONFIG.timeToleranceMs;
+    }
+
     async function findVerificationCode() {
-        const targetInboxId = sessionState.inboxId;
-        if (!targetInboxId) return { found: false, reason: 'no_inbox' };
-        
-        const messages = await getAgentMailMessages(targetInboxId);
+        if (!currentInbox || !currentInbox.inboxId) return { found: false, reason: 'no_inbox' };
+        const messages = await listAgentMailMessages(currentInbox.inboxId);
         if (!messages) return { found: false, reason: 'api_error' };
-        if (!Array.isArray(messages) || messages.length === 0) return { found: false, reason: 'no_messages' };
+        if (!messages.length) return { found: false, reason: 'no_messages' };
 
-        messages.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
-        
-        for (const msg of messages) {
-            if (sessionState.usedMessageIds.has(msg.id)) continue;
-            const msgTime = new Date(msg.created_at || 0).getTime();
-            if (sessionState.codeRequestedAt && msgTime < sessionState.codeRequestedAt - CONFIG.timeToleranceMs) continue;
+        messages.sort((a, b) => msgTime(b) - msgTime(a));
+        const fresh = messages.filter(isFresh);
+        if (!fresh.length) return { found: false, reason: 'waiting_new_email', count: messages.length };
 
-            const fullMsg = (await getAgentMailMessageDetail(targetInboxId, msg.id)) || msg;
-            const code = extractCode(fullMsg);
-            if (code) {
-                return {
-                    found: true, code, messageId: msg.id,
-                    ageSec: Math.max(0, Math.round((Date.now() - msgTime) / 1000))
-                };
-            }
+        for (const msg of fresh) {
+            if (usedMessageIds.has(msg.message_id)) continue;
+            const full = (await getAgentMailMessage(currentInbox.inboxId, msg.message_id)) || msg;
+            const code = extractCode(full);
+            if (code) return {
+                found: true, code, messageId: msg.message_id,
+                ageSec: Math.max(0, Math.round((Date.now() - msgTime(msg)) / 1000))
+            };
         }
-        return { found: false, reason: 'no_code_in_fresh', count: messages.length };
+        return { found: false, reason: 'no_code_in_fresh', count: fresh.length };
+    }
+
+    // ============================================
+    // ВВОД В ПОЛЯ
+    // ============================================
+    function fillInput(input, value) {
+        if (!input) return false;
+        focusField(input); setReactValue(input, ''); setReactValue(input, value);
+        dispatchInputEvent(input, value); input.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+    }
+
+    async function typeLikeHuman(input, text) {
+        if (!input) return;
+        await focusField(input); setReactValue(input, '');
+        const minDelay = CONFIG.fastMode ? 20 : 80;
+        const maxDelay = CONFIG.fastMode ? 60 : 180;
+        for (let i = 0; i < text.length; i++) {
+            setReactValue(input, input.value + text[i]);
+            dispatchInputEvent(input, text[i]);
+            let d = minDelay + Math.random() * (maxDelay - minDelay);
+            if (!CONFIG.fastMode) {
+                if (i < 3 || i > text.length - 3) d += 50;
+                if (Math.random() < 0.08) await humanDelay(500, 1200);
+            }
+            await new Promise(r => setTimeout(r, d));
+        }
+        await humanDelay(50, 150);
+        input.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
     function findEmailInput() {
@@ -371,25 +472,10 @@
     async function fillCode(code) {
         const t = findCodeInputs();
         if (!t) return false;
-        if (t.type === 'single') { 
-            // Находим поле и вводим как человек
-            await focusField(t.input); 
-            setReactValue(t.input, ''); 
-            const minDelay = CONFIG.fastMode ? 20 : 80;
-            const maxDelay = CONFIG.fastMode ? 60 : 180;
-            for (let i = 0; i < code.length; i++) {
-                setReactValue(t.input, t.input.value + code[i]);
-                dispatchInputEvent(t.input, code[i]);
-                await new Promise(r => setTimeout(r, minDelay + Math.random() * (maxDelay - minDelay)));
-            }
-            t.input.dispatchEvent(new Event('change', { bubbles: true }));
-            return true; 
-        }
-        // Если 6 отдельных полей
+        if (t.type === 'single') { await typeLikeHuman(t.input, code); return true; }
         for (let i = 0; i < t.inputs.length && i < code.length; i++) {
             await focusField(t.inputs[i]);
-            setReactValue(t.inputs[i], code[i]); 
-            dispatchInputEvent(t.inputs[i], code[i]);
+            setReactValue(t.inputs[i], code[i]); dispatchInputEvent(t.inputs[i], code[i]);
         }
         return true;
     }
@@ -421,292 +507,419 @@
     }
 
     // ============================================
-    // 7. ОЧИСТКА СЕССИИ
+    // ПРОВЕРКИ СОСТОЯНИЯ
     // ============================================
-    async function cleanupSession() {
-        showNotification('Очистка временных данных...', 'info', 3000);
-        const useSL = (await getData('useSimpleLogin')) === 'true';
-        
-        if (useSL) {
-            // В режиме SimpleLogin мы удаляем ТОЛЬКО алиас, основной ящик AgentMail остаётся
-            if (sessionState.slAliasId) {
-                await deleteSimpleLoginAlias(sessionState.slAliasId);
-            }
-        } else {
-            // В прямом режиме мы удаляем созданный скриптом ящик AgentMail
-            if (sessionState.inboxId) {
-                await deleteAgentMailInbox(sessionState.inboxId);
-            }
-        }
-        
-        sessionState.inboxId = null;
-        sessionState.inboxEmail = null;
-        sessionState.slAliasId = null;
-        sessionState.codeRequestedAt = null;
-        sessionState.usedMessageIds = new Set();
+    function isUserLoggedIn() {
+        if (document.querySelector('[data-testid="user-menu"], .user-menu')) return true;
+        if (window.location.href.includes('/c/')) return true;
+        return false;
     }
 
-    // ============================================
-    // 8. ИНТЕРФЕЙС И МОДАЛЬНЫЕ ОКНА
-    // ============================================
-    function openSettingsModal() {
-        const existing = document.getElementById('ar-settings-modal');
-        if (existing) existing.remove();
-        applyThemeStyles();
-
-        const overlay = document.createElement('div');
-        overlay.id = 'ar-settings-modal';
-        overlay.className = 'ar-overlay';
-        
-        const modal = document.createElement('div');
-        modal.className = 'ar-modal';
-        
-        const useSL = (await getData('useSimpleLogin')) === 'true';
-        
-        modal.innerHTML = `
-            <h2 style="margin:0 0 20px;color:var(--ar-fg);font-size:20px;">⚙️ Настройки API</h2>
-            <div style="margin-bottom:16px;">
-                <label style="display:block;color:var(--ar-fg);font-size:14px;margin-bottom:6px;font-weight:600;">AgentMail.to API Key</label>
-                <input id="ar-am-key" class="ar-input" type="password" placeholder="am_...">
-            </div>
-            <div style="margin-bottom:16px;">
-                <label style="display:block;color:var(--ar-fg);font-size:14px;margin-bottom:6px;font-weight:600;">SimpleLogin API Key (если используете)</label>
-                <input id="ar-sl-key" class="ar-input" type="password" placeholder="sl_...">
-            </div>
-            <div style="margin-bottom:16px;display:flex;align-items:center;gap:10px;">
-                <input id="ar-use-sl" type="checkbox" ${useSL ? 'checked' : ''} style="width:20px;height:20px;cursor:pointer;">
-                <label for="ar-use-sl" style="color:var(--ar-fg);font-size:14px;cursor:pointer;">Использовать SimpleLogin (Рекомендуется)</label>
-            </div>
-            <div id="ar-sl-instructions" style="display:${useSL ? 'block' : 'none'}; margin-bottom:20px; padding:12px; background:var(--ar-input-bg); border-radius:8px; border-left:4px solid #f39c12;">
-                <p style="margin:0 0 8px 0; color:var(--ar-fg); font-size:13px; font-weight:600;">⚠️ Важная инструкция для режима SimpleLogin:</p>
-                <ol style="margin:0; padding-left:20px; color:var(--ar-fg-muted); font-size:13px; line-height:1.5;">
-                    <li>Создайте ящик на agentmail.to (вручную через их сайт).</li>
-                    <li>Добавьте этот email в SimpleLogin как новый Mailbox и <b>подтвердите его</b> (пройдите верификацию по ссылке из письма).</li>
-                    <li>Скопируйте <b>Inbox ID</b> этого ящика из AgentMail и вставьте ниже.</li>
-                </ol>
-                <label style="display:block;color:var(--ar-fg);font-size:14px;margin:12px 0 6px 0;font-weight:600;">AgentMail Inbox ID (постоянный)</label>
-                <input id="ar-am-inbox-id" class="ar-input" type="text" placeholder="Например: inbox_12345abcde">
-            </div>
-            <div style="display:flex;gap:10px;justify-content:flex-end; margin-top:20px;">
-                <button id="ar-cancel-settings" class="ar-btn-secondary" style="width:auto; margin:0;">Отмена</button>
-                <button id="ar-save-settings" class="ar-btn-primary" style="width:auto; margin:0;">Сохранить</button>
-            </div>
-        `;
-        
-        overlay.appendChild(modal);
-        document.body.appendChild(overlay);
-
-        Promise.all([getData('agentMailApiKey'), getData('simpleLoginApiKey'), getData('agentMailInboxId')]).then(([amKey, slKey, amInboxId]) => {
-            document.getElementById('ar-am-key').value = amKey || '';
-            document.getElementById('ar-sl-key').value = slKey || '';
-            document.getElementById('ar-am-inbox-id').value = amInboxId || '';
-        });
-
-        document.getElementById('ar-use-sl').addEventListener('change', (e) => {
-            document.getElementById('ar-sl-instructions').style.display = e.target.checked ? 'block' : 'none';
-        });
-
-        document.getElementById('ar-cancel-settings').onclick = () => overlay.remove();
-        document.getElementById('ar-save-settings').onclick = async () => {
-            await saveData('agentMailApiKey', document.getElementById('ar-am-key').value.trim());
-            await saveData('simpleLoginApiKey', document.getElementById('ar-sl-key').value.trim());
-            await saveData('useSimpleLogin', document.getElementById('ar-use-sl').checked ? 'true' : 'false');
-            await saveData('agentMailInboxId', document.getElementById('ar-am-inbox-id').value.trim());
-            showNotification('Настройки сохранены', 'success', 3000);
-            overlay.remove();
-        };
-        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+    function hasLoginButton() {
+        return [...document.querySelectorAll('button, a, div[role="button"]')].some(b =>
+            ['Войти', 'Sign in', 'Log in', 'Login'].includes(b.textContent.trim())
+        );
     }
 
-    function showRegistrationDialog() {
+    function canShowContextMenu() {
+        if (hasLoginButton()) return false;
+        if (window.location.hostname.includes('auth.openai.com')) return false;
+        if (findEmailInput()) return false;
+        if (isUserLoggedIn()) return true;
+        const hasNewChat = [...document.querySelectorAll('a, button')].some(el =>
+            ['Новый чат', 'New chat'].includes(el.textContent.trim())
+        );
+        const hasPromptInput = document.querySelector('textarea[placeholder*="Спросите"], textarea[placeholder*="Message"]');
+        return hasNewChat && hasPromptInput;
+    }
+
+    const isOnLoginPage = () => window.location.hostname.includes('auth.openai.com') || findEmailInput() !== null;
+    const isOnProfilePage = () => { const f = findProfileFields(); return !!(f.nameInput && f.ageInput); };
+
+    // ============================================
+    // ДИАЛОГ ВЫБОРА
+    // ============================================
+    function showEmailChoiceDialog() {
         return new Promise(async (resolve) => {
-            applyThemeStyles();
             const overlay = document.createElement('div');
-            overlay.className = 'ar-overlay';
-            
-            const modal = document.createElement('div');
-            modal.className = 'ar-modal';
-            modal.style.textAlign = 'center';
-            
-            const amKey = await getData('agentMailApiKey');
-            const useSL = (await getData('useSimpleLogin')) === 'true';
-            const hasKey = !!amKey;
-            const slReady = useSL ? !!(await getData('agentMailInboxId')) : true;
-            const canStart = hasKey && slReady;
-            
-            modal.innerHTML = `
-                <h2 style="margin:0 0 16px;color:var(--ar-fg);">🚀 Регистрация ChatGPT</h2>
-                <p style="color:var(--ar-fg-muted);font-size:15px;margin-bottom:24px;line-height:1.5;">
-                    ${!hasKey ? '⚠️ API ключ AgentMail.to не найден!' : 
-                      !slReady ? '⚠️ Не указан Inbox ID для SimpleLogin!' :
-                      `Готов к запуску.<br><span style="font-size:13px;opacity:0.8;">Режим: ${useSL ? 'SimpleLogin Алиас → Ваш AgentMail' : 'Прямой AgentMail (с авто-удалением)'}</span>`}
+            overlay.style.cssText = 'position:fixed;inset:0;background:var(--gpt-overlay);z-index:999999;display:flex;align-items:center;justify-content:center;';
+            const dialog = document.createElement('div');
+            dialog.style.cssText = `background:var(--gpt-bg);color:var(--gpt-fg);padding:28px;border-radius:20px;max-width:420px;width:90%;text-align:center;box-shadow:0 10px 40px var(--gpt-shadow);`;
+            dialog.innerHTML = `
+                <h2 style="margin:0 0 16px;color:var(--gpt-fg);">Регистрация ChatGPT</h2>
+                <p style="color:var(--gpt-fg-muted);font-size:13px;margin-bottom:16px;">
+                    Почта: <b>AgentMail.to</b>
                 </p>
-                <div style="display:flex;flex-direction:column;gap:12px;">
-                    <button id="ar-start-reg" class="ar-btn-primary" ${!canStart ? 'disabled' : ''}>Начать регистрацию</button>
-                    <button id="ar-open-settings" class="ar-btn-secondary">⚙️ Настройки API</button>
-                    <button id="ar-cancel-reg" class="ar-btn-text">Отмена</button>
-                </div>
-            `;
-            
-            overlay.appendChild(modal);
-            document.body.appendChild(overlay);
-            
-            document.getElementById('ar-start-reg').onclick = () => { overlay.remove(); resolve('start'); };
-            document.getElementById('ar-open-settings').onclick = () => { overlay.remove(); openSettingsModal(); resolve('cancel'); };
-            document.getElementById('ar-cancel-reg').onclick = () => { overlay.remove(); resolve('cancel'); };
+                <p style="color:var(--gpt-fg-muted);font-size:12px;" id="oldEmailDisplay"></p>
+                <div style="display:flex;flex-direction:column;gap:10px;">
+                    <button id="newEmailBtn" style="padding:14px;background:var(--gpt-accent);color:white;border:none;border-radius:12px;font-size:15px;cursor:pointer;">Создать новый inbox</button>
+                    <button id="oldEmailBtn" style="padding:14px;background:var(--gpt-hover);color:var(--gpt-fg);border:1px solid var(--gpt-border);border-radius:12px;font-size:15px;cursor:pointer;display:none;">Продолжить прошлый</button>
+                    <button id="cancelBtn" style="padding:12px;background:transparent;color:var(--gpt-fg-muted);border:none;font-size:14px;cursor:pointer;">Отмена</button>
+                </div>`;
+            overlay.appendChild(dialog); document.body.appendChild(overlay);
+            const oldInbox = await getData('currentInbox');
+            dialog.querySelector('#oldEmailDisplay').textContent = oldInbox ? `📧 ${oldInbox.email}` : '';
+            if (oldInbox) dialog.querySelector('#oldEmailBtn').style.display = 'block';
+            dialog.querySelector('#newEmailBtn').onclick = async () => { overlay.remove(); await saveData('currentInbox', null); resolve('new'); };
+            dialog.querySelector('#oldEmailBtn').onclick = () => { overlay.remove(); resolve('old'); };
+            dialog.querySelector('#cancelBtn').onclick = () => { overlay.remove(); resolve('cancel'); };
             overlay.onclick = (e) => { if (e.target === overlay) { overlay.remove(); resolve('cancel'); } };
         });
     }
 
+    // ============================================
+    // МОДАЛКА ПОМОЩИ
+    // ============================================
     function showHelpModal() {
-        const existing = document.getElementById('ar-help-modal');
-        if (existing) existing.remove();
-        applyThemeStyles();
+        if (helpModal) helpModal.remove();
+        helpModal = document.createElement('div');
+        helpModal.style.cssText = 'position:fixed;inset:0;background:var(--gpt-overlay);z-index:999999;display:flex;align-items:center;justify-content:center;';
 
-        const overlay = document.createElement('div');
-        overlay.id = 'ar-help-modal';
-        overlay.className = 'ar-overlay';
-        
         const modal = document.createElement('div');
-        modal.className = 'ar-modal';
-        
+        modal.style.cssText = `background:var(--gpt-bg);color:var(--gpt-fg);padding:24px;border-radius:16px;max-width:620px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:0 10px 40px var(--gpt-shadow);`;
+
         modal.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
-                <h2 style="margin:0;color:var(--ar-fg);font-size:20px;">Помощь — ChatGPT Auto Register</h2>
-                <button id="ar-close-help" style="background:none;border:none;font-size:28px;cursor:pointer;color:var(--ar-fg-muted);padding:0 5px;">×</button>
+                <h2 style="margin:0;color:var(--gpt-fg);font-size:20px;">Помощь — ChatGPT Auto Register</h2>
+                <button id="closeHelp" style="background:none;border:none;font-size:24px;cursor:pointer;color:var(--gpt-fg-muted);padding:0 5px;">×</button>
             </div>
-            <div class="ar-help-text">
-                <h3>⚙️ 1. Получение ключей</h3>
-                <p>1. Зарегистрируйтесь на <a href="https://agentmail.to" target="_blank" style="color:#10a37f;">agentmail.to</a> и создайте API ключ (начинается с <code>am_</code>).</p>
-                <p>2. (Рекомендуется) Зарегистрируйтесь на <a href="https://app.simplelogin.io" target="_blank" style="color:#10a37f;">simplelogin.io</a> и создайте API ключ в настройках.</p>
 
-                <h3>🔄 2. Выбор режима работы</h3>
-                <p><b>Режим А: Прямой AgentMail (по умолчанию)</b><br>
-                Скрипт сам создаёт новую случайную почту → вводит её в ChatGPT → читает код → <b>безвозвратно удаляет</b> эту почту. <i>Минус: OpenAI иногда блокирует домены @agentmail.to.</i></p>
-                
-                <p><b>Режим Б: SimpleLogin + AgentMail (Рекомендуемый)</b><br>
-                1. Вручную создайте ящик на agentmail.to.<br>
-                2. В SimpleLogin добавьте этот email как новый "Mailbox" и <b>обязательно подтвердите его</b> (пройдите верификацию по ссылке из письма).<br>
-                3. В настройках скрипта включите "Использовать SimpleLogin" и вставьте <b>Inbox ID</b> вашего ящика AgentMail.<br>
-                4. <i>Как это работает:</i> Скрипт создаст временный <b>алиас</b> SimpleLogin (который OpenAI не блокирует), зарегистрирует аккаунт, заберёт код из вашего постоянного ящика AgentMail, а затем удалит только временный алиас. Ваш основной ящик AgentMail останется нетронутым.</p>
+            <div style="color:var(--gpt-fg);line-height:1.6;font-size:14px;">
 
-                <h3>🚀 3. Использование</h3>
-                <p>Нажмите крупную зелёную кнопку в правом нижнем углу или выберите "🚀 Начать регистрацию" в меню Tampermonkey. Скрипт автоматически найдёт поля, введёт данные и нажмёт "Continue".</p>
+                <div style="margin-bottom:22px;">
+                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">🔑 Шаг 1. Настройка ключа</h3>
+                    <ol style="margin:0;padding-left:20px;">
+                        <li style="margin-bottom:6px;">Откройте <b>console.agentmail.to</b> и войдите в аккаунт.</li>
+                        <li style="margin-bottom:6px;">Перейдите в <b>API Keys</b> → <b>Create New API Key</b>.</li>
+                        <li style="margin-bottom:6px;">Скопируйте ключ (начинается с <code>am_</code>).</li>
+                        <li>В скрипте нажмите <b>☰ → Настройки</b> и вставьте ключ. Нажмите <b>Сохранить</b>.</li>
+                    </ol>
+                    <p style="margin:10px 0 0 0;color:var(--gpt-fg-muted);font-size:13px;">
+                        Ключ сохраняется один раз и используется автоматически при следующих запусках.
+                    </p>
+                </div>
+
+                <div style="margin-bottom:22px;">
+                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">🚀 Шаг 2. Регистрация</h3>
+                    <ol style="margin:0;padding-left:20px;">
+                        <li style="margin-bottom:6px;">Откройте <b>chatgpt.com</b>. Убедитесь, что вы <b>не авторизованы</b>.</li>
+                        <li style="margin-bottom:6px;">Нажмите кнопку <b>⚡ Регистрация</b> в левом верхнем углу.</li>
+                        <li style="margin-bottom:6px;">В диалоге выберите <b>«Создать новый inbox»</b>.</li>
+                        <li style="margin-bottom:6px;">Скрипт сам: создаст ящик AgentMail → введёт email → дождётся письма → подставит код → заполнит профиль.</li>
+                        <li>Дождитесь сообщения <b>«Регистрация завершена!»</b>.</li>
+                    </ol>
+                </div>
+
+                <div style="margin-bottom:22px;">
+                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">📋 Шаг 3. Перенос контекста чата</h3>
+                    <ol style="margin:0;padding-left:20px;">
+                        <li style="margin-bottom:6px;">В старом аккаунте нажмите <b>☰ → Копировать контекст</b>.</li>
+                        <li style="margin-bottom:6px;">Выйдите из аккаунта (Avatar → Log out).</li>
+                        <li style="margin-bottom:6px;">Зарегистрируйте новый аккаунт через <b>⚡ Регистрация</b>.</li>
+                        <li>В новом чате нажмите <b>☰ → Вставить контекст</b>.</li>
+                    </ol>
+                </div>
+
+                <div>
+                    <h3 style="margin:0 0 12px 0;color:var(--gpt-fg);font-size:16px;border-bottom:2px solid var(--gpt-border);padding-bottom:8px;">⚙️ Управление ключами</h3>
+                    <ul style="margin:0;padding-left:20px;">
+                        <li style="margin-bottom:6px;"><b>Изменить ключ:</b> ☰ → Настройки → введите новый → Сохранить.</li>
+                        <li style="margin-bottom:6px;"><b>Удалить ключ:</b> ☰ → Настройки → «Удалить сохранённые ключи».</li>
+                        <li><b>Или вручную:</b> Tampermonkey Dashboard → ваш скрипт → Storage → удалить <code>chatgpt_helper_agentMailApiKey</code>.</li>
+                    </ul>
+                </div>
+
             </div>
         `;
-        overlay.appendChild(modal);
-        document.body.appendChild(overlay);
-        document.getElementById('ar-close-help').onclick = () => overlay.remove();
-        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+        helpModal.appendChild(modal);
+        document.body.appendChild(helpModal);
+        modal.querySelector('#closeHelp').onclick = () => { helpModal.remove(); helpModal = null; };
+        helpModal.onclick = (e) => { if (e.target === helpModal) { helpModal.remove(); helpModal = null; } };
     }
 
     // ============================================
-    // 9. ПЛАВАЮЩЕЕ МЕНЮ
+    // КОНТЕКСТНОЕ МЕНЮ
     // ============================================
-    let floatingMenu = null;
-    let menuExpanded = false;
+    let contextMenuWrapper = null;
+    let contextMenuPanel = null;
+    let menuVisible = false;
 
-    const ICON_SETTINGS = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
-    const ICON_PLAY = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
-    const ICON_HELP = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
+    const ICON_HAMBURGER = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>`;
+    const ICON_COPY = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+    const ICON_PASTE = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>`;
+    const ICON_SETTINGS = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
+    const ICON_HELP = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
 
-    function createFloatingMenu() {
-        if (floatingMenu) floatingMenu.remove();
-        applyThemeStyles();
+    function findChatMessages() {
+        const selectors = ['[data-message-author-role]', '[data-testid^="conversation-turn-"]', '.message', 'div[class*="message"]', 'div[class*="markdown"]'];
+        const messages = [];
+        for (const sel of selectors) {
+            const els = document.querySelectorAll(sel);
+            if (els.length > 0) {
+                els.forEach(el => {
+                    const role = el.getAttribute('data-message-author-role') ||
+                                (el.closest('[data-message-author-role]')?.getAttribute('data-message-author-role')) ||
+                                (el.textContent.trim().length > 10 ? 'unknown' : null);
+                    const text = el.innerText.trim();
+                    if (text && text.length > 5) messages.push({ role: role || 'unknown', text });
+                });
+                break;
+            }
+        }
+        return messages;
+    }
 
-        floatingMenu = document.createElement('div');
-        floatingMenu.id = 'ar-floating-menu';
+    function findChatInput() {
+        const selectors = ['textarea#prompt-textarea', 'textarea[placeholder*="Message"]', 'textarea[placeholder*="Спросите"]', 'textarea[placeholder*="Ask"]', 'textarea', 'div[contenteditable="true"]'];
+        for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (el && el.offsetParent !== null) return el;
+        }
+        return null;
+    }
 
-        const mainBtn = document.createElement('button');
-        mainBtn.id = 'ar-main-btn';
-        mainBtn.innerHTML = ICON_SETTINGS;
-        mainBtn.title = 'Открыть меню';
-        mainBtn.onclick = (e) => {
-            e.stopPropagation();
-            menuExpanded = !menuExpanded;
-            subMenu.style.display = menuExpanded ? 'flex' : 'none';
-        };
+    async function copyContext() {
+        const messages = findChatMessages();
+        if (messages.length === 0) { showNotification('Не найдено сообщений в чате', 'error', 5000); return; }
+        const formatted = messages.map(m => `[${m.role === 'user' ? 'Пользователь' : m.role === 'assistant' ? 'Ассистент' : 'Неизвестно'}]: ${m.text}`).join('\n\n');
+        savedContext = formatted;
+        await saveData('savedContext', formatted);
+        try {
+            if (typeof GM_setClipboard !== 'undefined') GM_setClipboard(formatted, 'text');
+            else await navigator.clipboard.writeText(formatted);
+            showNotification(`Контекст скопирован (${messages.length} сообщ., ${formatted.length} симв.)`, 'success', 4000);
+        } catch (e) { showNotification('Ошибка копирования', 'error', 5000); }
+        closeContextMenu();
+    }
 
-        const subMenu = document.createElement('div');
-        subMenu.id = 'ar-sub-menu';
-        
-        const makeSubBtn = (icon, title, onClick) => {
+    async function pasteContext() {
+        if (!savedContext) savedContext = await getData('savedContext');
+        if (!savedContext) { showNotification('Сначала скопируйте контекст', 'warning', 5000); return; }
+        const input = findChatInput();
+        if (!input) { showNotification('Поле ввода не найдено', 'error', 5000); return; }
+        if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') await typeLikeHuman(input, savedContext);
+        else if (input.isContentEditable) {
+            input.focus(); input.innerText = savedContext;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        showNotification(`Контекст вставлен (${savedContext.length} симв.)`, 'success', 4000);
+        closeContextMenu();
+    }
+
+    function closeContextMenu() {
+        if (contextMenuPanel) contextMenuPanel.style.display = 'none';
+        menuVisible = false;
+    }
+    function toggleContextMenu() {
+        if (!contextMenuPanel) return;
+        menuVisible = !menuVisible;
+        contextMenuPanel.style.display = menuVisible ? 'flex' : 'none';
+    }
+
+    function createContextMenu() {
+        if (contextMenuWrapper) contextMenuWrapper.remove();
+        contextMenuWrapper = null; contextMenuPanel = null; menuVisible = false;
+        if (!canShowContextMenu()) return;
+
+        contextMenuWrapper = document.createElement('div');
+        contextMenuWrapper.style.cssText = `position:fixed;top:50px;right:20px;z-index:99999;display:flex;flex-direction:column;align-items:flex-end;gap:8px;`;
+
+        const trigger = document.createElement('button');
+        trigger.innerHTML = ICON_HAMBURGER;
+        trigger.title = 'Менеджер контекста';
+        trigger.style.cssText = `width:44px;height:44px;border-radius:12px;background:var(--gpt-bg);color:var(--gpt-fg);border:1px solid var(--gpt-border);cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px var(--gpt-shadow);transition:background 0.2s;`;
+        trigger.addEventListener('mouseenter', () => { trigger.style.background = 'var(--gpt-hover)'; });
+        trigger.addEventListener('mouseleave', () => { trigger.style.background = 'var(--gpt-bg)'; });
+
+        contextMenuPanel = document.createElement('div');
+        contextMenuPanel.style.cssText = `display:none;flex-direction:column;gap:6px;background:var(--gpt-bg);padding:10px;border-radius:12px;box-shadow:0 4px 20px var(--gpt-shadow);border:1px solid var(--gpt-border);min-width:230px;`;
+
+        const makeBtn = (icon, text, onClick) => {
             const b = document.createElement('button');
-            b.className = 'ar-sub-btn';
-            b.title = title;
-            b.innerHTML = icon;
+            b.innerHTML = `<span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;margin-right:8px;">${icon}</span><span>${text}</span>`;
+            b.style.cssText = `display:flex;align-items:center;padding:10px 12px;background:transparent;color:var(--gpt-fg);border:1px solid var(--gpt-border);border-radius:8px;font-size:13px;cursor:pointer;font-weight:500;text-align:left;transition:background 0.2s;`;
+            b.addEventListener('mouseenter', () => { b.style.background = 'var(--gpt-hover)'; });
+            b.addEventListener('mouseleave', () => { b.style.background = 'transparent'; });
             b.onclick = (e) => { e.stopPropagation(); onClick(); };
             return b;
         };
 
-        subMenu.appendChild(makeSubBtn(ICON_PLAY, 'Начать регистрацию', async () => {
-            menuExpanded = false; subMenu.style.display = 'none';
-            const action = await showRegistrationDialog();
-            if (action === 'start') {
-                sessionState.isRunning = true;
-                await runStage();
-                sessionState.isRunning = false;
-            }
-        }));
-        subMenu.appendChild(makeSubBtn(ICON_HELP, 'Помощь и инструкция', showHelpModal));
-        subMenu.appendChild(makeSubBtn(ICON_SETTINGS, 'Настройки API', openSettingsModal));
+        contextMenuPanel.appendChild(makeBtn(ICON_COPY, 'Копировать контекст', copyContext));
+        contextMenuPanel.appendChild(makeBtn(ICON_PASTE, 'Вставить контекст', pasteContext));
+        contextMenuPanel.appendChild(makeBtn(ICON_SETTINGS, 'Настройки', () => { closeContextMenu(); showSettingsDialog(); }));
+        contextMenuPanel.appendChild(makeBtn(ICON_HELP, 'Помощь', () => { closeContextMenu(); showHelpModal(); }));
 
-        floatingMenu.appendChild(subMenu);
-        floatingMenu.appendChild(mainBtn);
-        document.body.appendChild(floatingMenu);
+        trigger.onclick = (e) => { e.stopPropagation(); toggleContextMenu(); };
+        contextMenuWrapper.appendChild(trigger);
+        contextMenuWrapper.appendChild(contextMenuPanel);
+        document.body.appendChild(contextMenuWrapper);
 
-        document.addEventListener('click', (e) => {
-            if (floatingMenu && !floatingMenu.contains(e.target) && menuExpanded) {
-                menuExpanded = false;
-                subMenu.style.display = 'none';
-            }
-        });
+        setTimeout(() => {
+            document.addEventListener('click', (e) => {
+                if (contextMenuWrapper && !contextMenuWrapper.contains(e.target)) closeContextMenu();
+            });
+        }, 100);
     }
 
     // ============================================
-    // 10. ЭТАПЫ РЕГИСТРАЦИИ (Как в оригинале)
+    // КНОПКА ЗАПУСКА РЕГИСТРАЦИИ
     // ============================================
-    async function stageLogin() {
-        if (sessionState.registrationComplete) return;
-        
-        const useSL = (await getData('useSimpleLogin')) === 'true';
-        let registrationEmail = '';
+    let regButton = null;
 
-        if (useSL) {
-            const targetInboxEmail = await getData('agentMailInboxId'); // Тут храним email или ID, проверим
-            // Для простоты, если пользователь ввёл ID, нам нужен email. Но API SL требует email для поиска.
-            // Давайте попросим пользователя вводить Email ящика в настройках, а не ID, это надёжнее.
-            // Исправление: в настройках выше я назвал поле "Inbox ID", но для поиска ящика в SL нужен Email.
-            // Я изменю логику: пользователь вводит Email своего постоянного ящика AgentMail в настройках.
-            const permanentAgentMailEmail = await getData('agentMailPermanentEmail');
-            const permanentInboxId = await getData('agentMailInboxId');
-            
-            if (!permanentAgentMailEmail || !permanentInboxId) {
-                showNotification('Ошибка: В настройках SimpleLogin не указан Email и ID постоянного ящика AgentMail!', 'error', 8000);
-                return;
-            }
+    function createRegisterButton() {
+        if (regButton) return;
+        if (!window.location.hostname.includes('chatgpt.com') && !window.location.hostname.includes('auth.openai.com')) return;
 
-            showNotification('Создание алиаса SimpleLogin...', 'info', 3000);
-            const slData = await createSimpleLoginAlias(permanentAgentMailEmail);
-            if (!slData || !slData.alias) {
-                showNotification('Не удалось создать алиас SimpleLogin.', 'error', 8000);
-                return;
-            }
-            registrationEmail = slData.alias;
-            sessionState.slAliasId = slData.id;
-            sessionState.inboxId = permanentInboxId; // Читаем из постоянного ящика
-            showNotification(`Алиас создан: ${registrationEmail}`, 'success', 4000);
-        } else {
-            showNotification('Создание временного ящика AgentMail...', 'info', 3000);
-            const inboxData = await createAgentMailInbox();
-            if (!inboxData) return;
-            sessionState.inboxId = inboxData.id;
-            sessionState.inboxEmail = inboxData.email;
-            registrationEmail = inboxData.email;
+        regButton = document.createElement('button');
+        regButton.id = 'gpt-auto-register-btn';
+        regButton.title = 'Запустить регистрацию ChatGPT';
+        regButton.innerHTML = `
+            <span style="display:inline-flex;align-items:center;gap:6px;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                </svg>
+                <span id="gpt-auto-register-label" style="font-weight:600;">Регистрация</span>
+            </span>`;
+        regButton.style.cssText = `
+            position:fixed; top:8px; left:8px; z-index:99998;
+            height:36px; padding:0 14px; border-radius:10px;
+            background:var(--gpt-bg); color:var(--gpt-fg);
+            border:1px solid var(--gpt-border);
+            cursor:pointer; font-size:13px; font-family:inherit;
+            display:flex; align-items:center; justify-content:center;
+            box-shadow:0 2px 10px var(--gpt-shadow);
+            transition:background 0.15s, transform 0.1s;
+            opacity:0.95;
+        `;
+        regButton.addEventListener('mouseenter', () => { regButton.style.background = 'var(--gpt-hover)'; });
+        regButton.addEventListener('mouseleave', () => { regButton.style.background = 'var(--gpt-bg)'; });
+        regButton.addEventListener('mousedown', () => { regButton.style.transform = 'scale(0.97)'; });
+        regButton.addEventListener('mouseup', () => { regButton.style.transform = 'scale(1)'; });
+
+        regButton.onclick = (e) => {
+            e.stopPropagation();
+            startRegistrationManual();
+        };
+        document.body.appendChild(regButton);
+    }
+
+    function setRegisterButtonLabel(text, state = 'idle') {
+        if (!regButton) return;
+        const label = regButton.querySelector('#gpt-auto-register-label');
+        if (label) label.textContent = text;
+        const colors = { idle: 'var(--gpt-fg)', running: '#10a37f', error: '#e74c3c' };
+        regButton.style.color = colors[state] || colors.idle;
+    }
+
+    async function startRegistrationManual() {
+        if (isRunning || registrationComplete) {
+            if (registrationComplete) showNotification('Регистрация уже завершена', 'info', 3000);
+            return;
         }
 
-        sessionState.codeRequestedAt = Date.now();
-        sessionState.usedMessageIds = new Set();
+        // Проверяем ключи перед запуском
+        const hasKeys = await ensureApiKeys();
+        if (!hasKeys) {
+            showNotification('Настройка отменена', 'warning', 4000);
+            return;
+        }
+
+        setRegisterButtonLabel('Запуск…', 'running');
+        try {
+            loginAttempted = false; verifyCompleted = false; codeInserted = false;
+            await runStage();
+        } finally {
+            setTimeout(() => setRegisterButtonLabel('Регистрация', 'idle'), 1500);
+        }
+    }
+
+    // ============================================
+    // НАБЛЮДАТЕЛИ
+    // ============================================
+    function startAuthObserver() {
+        if (authObserver) authObserver.disconnect();
+        if (canShowContextMenu()) { createContextMenu(); return; }
+        authObserver = new MutationObserver(() => {
+            if (canShowContextMenu()) {
+                createContextMenu();
+                authObserver.disconnect();
+                authObserver = null;
+            }
+        });
+        authObserver.observe(document.body, {
+            childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'data-testid']
+        });
+        setTimeout(() => { if (authObserver) { authObserver.disconnect(); authObserver = null; } }, 15000);
+    }
+
+    function startUrlWatcher(callback, timeout = 15000) {
+        stopUrlWatcher();
+        let lastUrl = window.location.href;
+        let elapsed = 0;
+        urlWatcher = setInterval(() => {
+            if (window.location.href !== lastUrl) { stopUrlWatcher(); callback(); }
+            else {
+                elapsed += 500;
+                if (elapsed >= timeout) { stopUrlWatcher(); callback(true); }
+            }
+        }, 500);
+    }
+    function stopUrlWatcher() { if (urlWatcher) { clearInterval(urlWatcher); urlWatcher = null; } }
+
+    // ============================================
+    // ЭТАПЫ
+    // ============================================
+    async function stageMain() {
+        if (loginAttempted || registrationComplete) return;
+        if (isOnLoginPage()) { await stageLogin(); return; }
+        showNotification('Нажимаю "Войти"', 'info');
+        loginAttempted = true;
+        let btn = null;
+        for (let i = 0; i < 10 && !btn; i++) {
+            for (const b of document.querySelectorAll('button, a, div[role="button"]')) {
+                const t = b.textContent.trim();
+                if (['Войти', 'Sign in', 'Log in', 'Login'].includes(t)) { btn = b; break; }
+            }
+            if (!btn) await new Promise(r => setTimeout(r, 300));
+        }
+        if (btn) {
+            await humanClick(btn);
+            startUrlWatcher(() => {
+                loginAttempted = false;
+                if (!registrationComplete) runStage();
+            }, 10000);
+        } else {
+            showNotification('Кнопка "Войти" не найдена', 'error');
+            loginAttempted = false;
+        }
+    }
+
+    async function stageLogin() {
+        if (registrationComplete) return;
+        const choice = await showEmailChoiceDialog();
+        if (choice === 'cancel') return;
+
+        let emailToUse;
+        if (choice === 'new') {
+            setRegisterButtonLabel('Создаю inbox…', 'running');
+            showNotification('AgentMail: создаю inbox…', 'info', 4000);
+            const inbox = await createAgentMailInbox();
+            if (!inbox) { setRegisterButtonLabel('Регистрация', 'error'); return; }
+            currentInbox = inbox;
+            emailToUse = inbox.email;
+            codeRequestedAt = Date.now();
+            usedMessageIds = new Set();
+            await saveData('usedMessageIds', []);
+            await saveData('codeRequestedAt', codeRequestedAt);
+            await saveData('currentInbox', inbox);
+            showNotification(`Inbox: ${emailToUse}`, 'success', 6000);
+        } else {
+            const saved = await getData('currentInbox');
+            if (!saved) { showNotification('Нет сохранённого inbox', 'error'); return; }
+            currentInbox = saved;
+            emailToUse = saved.email;
+            codeRequestedAt = await getData('codeRequestedAt');
+        }
 
         let input = null;
         for (let i = 0; i < 8 && !input; i++) {
@@ -715,171 +928,146 @@
         }
         if (!input) { showNotification('Поле email не найдено', 'error'); return; }
 
-        // Ввод email как человек
-        await focusField(input);
-        setReactValue(input, '');
-        const minDelay = CONFIG.fastMode ? 20 : 80;
-        const maxDelay = CONFIG.fastMode ? 60 : 180;
-        for (let i = 0; i < registrationEmail.length; i++) {
-            setReactValue(input, input.value + registrationEmail[i]);
-            dispatchInputEvent(input, registrationEmail[i]);
-            await new Promise(r => setTimeout(r, minDelay + Math.random() * (maxDelay - minDelay)));
-        }
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        
-        showNotification(`Email введён: ${registrationEmail}`, 'success');
+        await typeLikeHuman(input, emailToUse);
         await humanDelay(100, 300);
         await clickContinue();
+
+        startUrlWatcher(() => { if (!registrationComplete) runStage(); }, 12000);
+    }
+
+    async function watchCodeResult() {
+        const start = Date.now();
+        while (Date.now() - start < 60000) {
+            await new Promise(r => setTimeout(r, 3000));
+            if (registrationComplete) return;
+            if (!findCodeInputs()) return;
+        }
+        showNotification('Код не подошёл. Нажмите «Resend code» — поймаю новое письмо.', 'warning', 12000);
+        codeInserted = false; verifyCompleted = false;
+        setTimeout(runStage, 1000);
     }
 
     async function stageVerify() {
-        if (sessionState.verifyCompleted || sessionState.registrationComplete || sessionState.isRunning) return;
-        if (sessionState.codeInserted) { sessionState.verifyCompleted = true; await stageProfile(); return; }
-        
-        if (!sessionState.inboxId) { showNotification('Нет активного inbox ID для проверки почты', 'error'); return; }
+        if (verifyCompleted || registrationComplete || pollingActive) return;
+        if (codeInserted) { verifyCompleted = true; await stageProfile(); return; }
+        pollingActive = true;
+        if (codeRequestedAt == null) codeRequestedAt = await getData('codeRequestedAt');
+        if (!currentInbox) currentInbox = await getData('currentInbox');
+        if (!currentInbox || !currentInbox.inboxId) {
+            showNotification('Нет inbox для проверки', 'error'); pollingActive = false; return;
+        }
 
         for (let i = 0; i < CONFIG.maxAttempts; i++) {
-            if (sessionState.registrationComplete) return;
             const attempt = i + 1;
-            if (attempt <= 3 || attempt % 10 === 0) showNotification(`Проверка почты #${attempt}/${CONFIG.maxAttempts}`, 'debug', 2000);
-            
+            if (attempt <= 3 || attempt % 10 === 0)
+                setRegisterButtonLabel(`Проверка #${attempt}`, 'running');
             const result = await findVerificationCode();
             if (result.found && result.code) {
-                showNotification(`Код найден: ${result.code} (письму ${result.ageSec}с)`, 'success', 8000);
+                showNotification(`Код: ${result.code} (письму ${result.ageSec}с)`, 'success', 8000);
+                setRegisterButtonLabel('Ввожу код…', 'running');
                 if (await fillCode(result.code)) {
-                    sessionState.codeInserted = true; 
-                    sessionState.verifyCompleted = true;
-                    sessionState.usedMessageIds.add(result.messageId);
-                    await humanDelay(200, 500); 
-                    await clickContinue();
+                    codeInserted = true; verifyCompleted = true;
+                    usedMessageIds.add(result.messageId);
+                    await saveData('usedMessageIds', [...usedMessageIds]);
+                    await humanDelay(200, 500); await clickContinue();
+                    watchCodeResult();
                     break;
                 } else {
                     showNotification(`Код: ${result.code} (введите вручную)`, 'info', 10000);
-                    return;
+                    pollingActive = false; return;
                 }
             }
+            if (result.reason === 'waiting_new_email' && (attempt === 1 || attempt % 6 === 0))
+                showNotification(`Ждём письмо (старых: ${result.count})`, 'info', 2000);
+            else if (result.reason === 'api_error' && attempt === 2)
+                showNotification('Ошибка API AgentMail', 'error', 6000);
+            else if (result.reason === 'no_messages' && attempt === 5)
+                showNotification('Inbox пуст', 'warning', 5000);
             await new Promise(r => setTimeout(r, CONFIG.checkInterval));
         }
-        setTimeout(() => { if (!sessionState.registrationComplete) runStage(); }, 1000);
+        pollingActive = false;
+        setTimeout(() => { if (!registrationComplete) runStage(); }, 1000);
     }
 
     async function stageProfile() {
-        if (sessionState.registrationComplete) return;
+        if (profileFilled || registrationComplete) return;
         const fields = findProfileFields();
-        if (!fields.nameInput || !fields.ageInput) { 
-            setTimeout(() => { if (!sessionState.registrationComplete) stageProfile(); }, 1000); 
-            return; 
+        if (!fields.nameInput || !fields.ageInput) {
+            setTimeout(() => { if (!profileFilled && !registrationComplete) stageProfile(); }, 1000);
+            return;
         }
         const name = generateUserData().firstName, age = generateAge();
-        showNotification(`Заполнение профиля: ${name}, ${age}`, 'info');
-        
-        // Ввод имени
-        await focusField(fields.nameInput);
-        setReactValue(fields.nameInput, '');
-        for (let i = 0; i < name.length; i++) {
-            setReactValue(fields.nameInput, fields.nameInput.value + name[i]);
-            dispatchInputEvent(fields.nameInput, name[i]);
-            await humanDelay(20, 60);
-        }
-        fields.nameInput.dispatchEvent(new Event('change', { bubbles: true }));
-        
+        showNotification(`Имя: ${name}, Возраст: ${age}`, 'info');
+        await typeLikeHuman(fields.nameInput, name);
         await humanDelay(200, 500);
-        
-        // Ввод возраста
-        setReactValue(fields.ageInput, String(age));
-        fields.ageInput.dispatchEvent(new Event('change', { bubbles: true }));
-        
+        fillInput(fields.ageInput, String(age));
+        profileFilled = true;
         await humanDelay(500, 1500);
         if (await clickContinue()) {
-            sessionState.registrationComplete = true;
-            showNotification('Регистрация успешно завершена!', 'success', 8000);
-            await cleanupSession(); // Удаляем временные данные
+            registrationComplete = true;
+            await saveData('complete', true);
+            showNotification('Регистрация завершена!', 'success', 8000);
+            setRegisterButtonLabel('Готово', 'running');
+            stopUrlWatcher();
+            if (window.urlCheckInterval) { clearInterval(window.urlCheckInterval); window.urlCheckInterval = null; }
         }
     }
 
     function detectStage() {
+        if (hasLoginButton() && window.location.hostname.includes('chatgpt.com')) return 'main';
         if (window.location.hostname.includes('auth.openai.com')) {
-            const fields = findProfileFields();
-            if (fields.nameInput && fields.ageInput) return 'profile';
+            if (isOnProfilePage()) return 'profile';
             if (findCodeInputs()) return 'verify';
             if (findEmailInput()) return 'login';
         }
-        if (window.location.hostname.includes('chatgpt.com')) {
-            if (document.querySelector('[data-testid="user-menu"], .user-menu') || window.location.href.includes('/c/')) return 'logged_in';
-        }
+        if (window.location.hostname.includes('chatgpt.com') && isUserLoggedIn()) return 'unknown';
         return 'unknown';
     }
 
     async function runStage() {
-        if (sessionState.isRunning || sessionState.registrationComplete) return;
-        sessionState.isRunning = true;
+        if (isRunning || registrationComplete) return;
+        isRunning = true;
         try {
             const stage = detectStage();
-            if (stage === 'login') await stageLogin();
+            if (stage === 'main') await stageMain();
+            else if (stage === 'login') await stageLogin();
             else if (stage === 'verify') await stageVerify();
             else if (stage === 'profile') await stageProfile();
-            else if (stage === 'logged_in') {
-                showNotification('Вы уже авторизованы!', 'success', 5000);
-                sessionState.registrationComplete = true;
-            } else {
-                showNotification('Перейдите на страницу входа ChatGPT (chatgpt.com)', 'info', 5000);
-            }
-        } catch (e) { 
-            showNotification(`Ошибка: ${e.message}`, 'error'); 
-            console.error(e);
-            await cleanupSession();
-        }
-        sessionState.isRunning = false;
+        } catch (e) { showNotification(`Ошибка: ${e.message}`, 'error'); }
+        isRunning = false;
     }
 
     // ============================================
-    // 11. ИНИЦИАЛИЗАЦИЯ
+    // INIT
     // ============================================
     async function init() {
-        applyThemeStyles();
-        sessionState.savedContext = await getData('savedContext');
+        if (initDone) return;
+        initDone = true;
+        injectThemeStyles();
 
-        // Создаём плавающее меню
-        createFloatingMenu();
-        
-        // Регистрируем команды в меню Tampermonkey (гарантированный доступ)
-        GM_registerMenuCommand("🚀 Начать регистрацию", async () => {
-            const action = await showRegistrationDialog();
-            if (action === 'start') {
-                sessionState.isRunning = true;
-                await runStage();
-                sessionState.isRunning = false;
+        // Загружаем сохранённый ключ
+        const savedKey = await getData('agentMailApiKey');
+        if (savedKey) CONFIG.agentMailApiKey = savedKey;
+
+        codeRequestedAt = await getData('codeRequestedAt');
+        ((await getData('usedMessageIds')) || []).forEach(id => usedMessageIds.add(id));
+        savedContext = await getData('savedContext');
+        currentInbox = await getData('currentInbox');
+
+        if (await getData('complete') && isUserLoggedIn()) registrationComplete = true;
+
+        startAuthObserver();
+        createRegisterButton();
+
+        let lastUrl = window.location.href;
+        window.urlCheckInterval = setInterval(() => {
+            if (window.location.href !== lastUrl) {
+                lastUrl = window.location.href;
+                startAuthObserver();
             }
-        });
-        GM_registerMenuCommand("⚙️ Настройки API", openSettingsModal);
-        GM_registerMenuCommand("❓ Помощь", showHelpModal);
-
-        // Наблюдатель за изменением системной темы
-        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyThemeStyles);
-        
-        // Наблюдатель за изменением темы на самом сайте (если сайт переключает класс 'dark')
-        const observer = new MutationObserver(() => {
-            if (document.documentElement.classList.contains('dark') || document.body.classList.contains('dark')) {
-                applyThemeStyles();
-            }
-        });
-        observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
-
-        // Если скрипт перезагружен на странице верификации и есть активная сессия
-        if (detectStage() === 'verify' && sessionState.inboxId) {
-            showNotification('Обнаружена страница верификации. Продолжаю...', 'info', 3000);
-            setTimeout(() => {
-                sessionState.isRunning = true;
-                runStage();
-                sessionState.isRunning = false;
-            }, 1500);
-        }
+        }, 1000);
     }
 
-    // Запуск
-    if (document.readyState === 'complete' || document.readyState === 'interactive') {
-        setTimeout(init, 1000); // Небольшая задержка для гарантии загрузки DOM
-    } else {
-        window.addEventListener('DOMContentLoaded', () => setTimeout(init, 1000));
-    }
+    if (document.readyState === 'complete') init();
+    else window.addEventListener('load', init);
 })();
